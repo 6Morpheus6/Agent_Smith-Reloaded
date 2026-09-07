@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Two-step login</title></head>
+<body>
+  <h1>Sign in</h1>
+  <div id="step1">
+    <input id="email" aria-label="Email or phone" placeholder="Email or phone">
+    <button id="next1">Next</button>
+  </div>
+  <!-- Password step is hidden until the email is submitted (Google/Microsoft style). -->
+  <div id="step2" style="display:none">
+    <span id="who"></span>
+    <input id="pw" type="password" aria-label="Enter your password" placeholder="Password">
+    <button id="next2">Next</button>
+  </div>
+  <div id="status">logged out</div>
+  <script>
+    var email = '';
+    function toStep2() {
+      email = document.getElementById('email').value.trim();
+      if (!email) return;
+      document.getElementById('step1').style.display = 'none';
+      document.getElementById('step2').style.display = '';
+      document.getElementById('who').textContent = email;
+    }
+    function doLogin() {
+      var pw = document.getElementById('pw').value;
+      if (!pw) return;
+      document.getElementById('status').textContent = 'LOGGED IN as ' + email + ' pwlen=' + pw.length;
+    }
+    document.getElementById('next1').addEventListener('click', toStep2);
+    document.getElementById('email').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); toStep2(); } });
+    document.getElementById('next2').addEventListener('click', doLogin);
+    document.getElementById('pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); doLogin(); } });
+  </script>
+</body>
+</html>

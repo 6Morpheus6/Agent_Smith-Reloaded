@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest",
+        "--headless",
+        "--isolated",
+        "--browser",
+        "chromium",
+        "--executable-path",
+        "/home/jerry/.cache/puppeteer/chrome/linux-146.0.7680.153/chrome-linux64/chrome",
+        "--no-sandbox"
+      ],
+      "env": {}
+    }
+  }
+}

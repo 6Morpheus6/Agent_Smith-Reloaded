@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Agent Test Form</title></head>
+<body>
+  <h1>Sign Up</h1>
+  <form id="f">
+    <label>Name <input id="name" name="name" placeholder="your name"></label>
+    <label>Email <input id="email" name="email" type="email" placeholder="you@example.com"></label>
+    <label><input id="sub" name="subscribe" type="checkbox"> Subscribe to newsletter</label>
+    <button id="go" type="submit">Create account</button>
+  </form>
+  <a id="home" href="#home">Go home</a>
+  <div id="result"></div>
+  <script>
+    document.getElementById('f').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var name = document.getElementById('name').value;
+      var sub = document.getElementById('sub').checked;
+      document.getElementById('result').textContent =
+        'SUBMITTED name=' + name + ' sub=' + sub;
+      document.title = 'Welcome ' + name;
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Messenger-like</title></head>
+<body>
+  <h1>Chat</h1>
+  <div id="filler"></div>
+  <div id="thread">Reefer: hey</div>
+  <!-- Facebook-style composer: role=textbox + contenteditable="plaintext-only",
+       placed AFTER 90+ other interactive elements (past the snapshot cap). -->
+  <div id="composer" role="textbox" contenteditable="plaintext-only" aria-label="Message"></div>
+  <script>
+    // 95 filler links to push the composer well past element #80.
+    var f = document.getElementById('filler');
+    for (var k = 0; k < 95; k++) { var a = document.createElement('a'); a.href = '#x' + k; a.textContent = 'link' + k; f.appendChild(a); }
+    // Lexical-style model: updates only from the real input pipeline.
+    var model = '';
+    var c = document.getElementById('composer'), thread = document.getElementById('thread');
+    c.addEventListener('input', function (e) {
+      if (e.inputType === 'insertText' && e.data != null) model += e.data;
+      else if (e.inputType === 'deleteContentBackward') model = model.slice(0, -1);
+    });
+    c.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (!model.trim().length) return;
+      thread.textContent += '\nYou: ' + model;
+      model = ''; c.textContent = '';
+    });
+  </script>
+</body>
+</html>

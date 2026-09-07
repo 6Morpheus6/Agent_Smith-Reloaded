@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Inbox</title></head>
+<body>
+  <h1>Inbox</h1>
+  <div id="reader">no email open</div>
+  <div id="list"></div>
+  <script>
+    // Gmail-like rows: each row is a <div> with a "star" span next to a subject <div>.
+    // Clicking the subject opens the email; clicking the star only stars it (wrong target).
+    var subjects = [
+      'Top 5 New Listings Matching Your Preferences - Hi Jerry, Here are the latest listings for you today and more',
+      'Security alert - A new sign-in on Linux for your account, please review the device',
+      '[GhostWrk/NanocodeV1] Run failed: CI - main (647a951) build pipeline failed on step three',
+      'Your Reimbursement Is Ready! - Your purchase is on us for the next 24 hours, act now'
+    ];
+    var list = document.getElementById('list'), reader = document.getElementById('reader');
+    subjects.forEach(function (s, i) {
+      var row = document.createElement('div'); row.className = 'row';
+      var star = document.createElement('span'); star.textContent = 'Not starred';
+      star.addEventListener('click', function (e) { e.stopPropagation(); reader.textContent = 'STARRED row ' + i; });
+      var subj = document.createElement('div'); subj.textContent = s;
+      subj.setAttribute('role', 'listitem'); subj.setAttribute('tabindex', '0'); // realistic (Gmail rows are focusable)
+      subj.addEventListener('click', function () { reader.textContent = 'OPENED: ' + s; });
+      row.appendChild(star); row.appendChild(subj); list.appendChild(row);
+    });
+  </script>
+</body>
+</html>

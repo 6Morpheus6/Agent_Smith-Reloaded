@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Auto Reply</title></head>
+<body>
+  <h1>Thread</h1>
+  <div id="thread">You: hi</div>
+  <script>
+    // Simulate the other person replying after a short delay, so a watcher can detect it.
+    setTimeout(function () {
+      var t = document.getElementById('thread');
+      t.textContent = t.textContent + '\nReefer: hey, who is this?';
+    }, 1500);
+  </script>
+</body>
+</html>

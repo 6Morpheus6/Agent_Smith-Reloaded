@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Live Chat</title></head>
+<body>
+  <h1>Chat with Reefer</h1>
+  <div id="thread">Reefer is online.</div>
+  <div id="composer" contenteditable="true" role="textbox" aria-label="Write to Reefer"></div>
+  <script>
+    var model = '', userCount = 0;
+    var c = document.getElementById('composer'), thread = document.getElementById('thread');
+    c.addEventListener('input', function (e) {
+      if (e.inputType === 'insertText' && e.data != null) model += e.data;
+      else if (e.inputType === 'deleteContentBackward') model = model.slice(0, -1);
+    });
+    c.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (!model.trim().length) return;
+      userCount++;
+      thread.textContent += '\nYou: ' + model;
+      if (userCount >= 2) {
+        thread.textContent += '\nCONVO_OK';   // the agent replied after seeing the response
+      } else {
+        setTimeout(function () { thread.textContent += '\nReefer: who are you?'; }, 1200);
+      }
+      model = ''; c.textContent = '';
+    });
+  </script>
+</body>
+</html>

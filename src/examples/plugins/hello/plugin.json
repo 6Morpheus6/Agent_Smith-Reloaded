@@ -1,0 +1,8 @@
+{
+  "id": "hello",
+  "name": "Hello Example",
+  "version": "1.0.0",
+  "description": "Minimal example plugin: one tool, one slash command, one hook.",
+  "author": "Agent Smith",
+  "capabilities": ["log"]
+}

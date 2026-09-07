@@ -1,0 +1,1 @@
+- [Running the Electron app](running-the-electron-app.md) — fetch the missing Electron binary, drive headlessly with playwright-core, bypass the auth gate via window.api

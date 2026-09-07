@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Send-button chat</title></head>
+<body>
+  <h1>Chat</h1>
+  <div id="thread">Reefer: hey</div>
+  <!-- Composer where Enter does NOT send; only the Send button does (like some chat UIs
+       / Facebook when Enter is intercepted). Tests the send-button fallback. -->
+  <div id="composer" role="textbox" contenteditable="true" aria-label="Message"></div>
+  <div id="send" role="button" aria-label="Send">➤</div>
+  <script>
+    var model = '';
+    var c = document.getElementById('composer'), thread = document.getElementById('thread');
+    c.addEventListener('input', function (e) {
+      if (e.inputType === 'insertText' && e.data != null) model += e.data;
+      else if (e.inputType === 'deleteContentBackward') model = model.slice(0, -1);
+    });
+    // Enter is intercepted and does NOT send (no-op) — forces use of the Send button.
+    c.addEventListener('keydown', function (e) { if (e.key === 'Enter') e.preventDefault(); });
+    document.getElementById('send').addEventListener('click', function () {
+      if (!model.trim().length) return;
+      thread.textContent += '\nYou: ' + model;
+      model = ''; c.textContent = '';
+    });
+  </script>
+</body>
+</html>

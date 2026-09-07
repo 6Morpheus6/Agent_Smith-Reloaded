@@ -1,0 +1,47 @@
+# PLAN.md
+
+> Task planning artifact. Created at the start of a task; updated as milestones are reached.
+> The agent should update this file throughout execution, not just at the end.
+
+## Task
+
+<!-- One sentence: what is being built or fixed. -->
+
+## Context
+
+<!-- Why this task exists. What triggered it. What the success state looks like. -->
+
+## Approach
+
+<!-- High-level strategy. What will change and why. Note key trade-offs considered. -->
+
+## Milestones
+
+Mark each milestone `[x]` when complete. Do not mark complete until the verification gate passes.
+
+- [ ] **M1: <name>** — <what done looks like> | verify: `<command or check>`
+- [ ] **M2: <name>** — <what done looks like> | e2e: `<playwright or test:e2e command>`
+- [ ] **Final: all tests pass** — verify: `<test command>`
+
+## Scope boundaries
+
+In scope:
+-
+
+Out of scope (explicitly excluded from this task):
+-
+
+## Open questions
+
+<!-- Format: - [ ] Question — where/how to resolve it -->
+
+## Risks
+
+<!-- What could go wrong. What assumptions this plan depends on. -->
+
+## Notes
+
+<!-- Running log of significant decisions made during execution. Append entries; do not overwrite. -->
+
+---
+*Created: YYYY-MM-DD*

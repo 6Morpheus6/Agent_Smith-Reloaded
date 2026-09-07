@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Smith Reloaded</title>
+    <link rel="icon" href="build/icons/256x256.png" type="image/png">
+    <link rel="stylesheet" href="src/renderer/styles/base.css">
+    <link rel="stylesheet" href="src/renderer/styles/overlay.css">
+    <script src="src/renderer/effects/bgEffect.js" defer></script>
+    <script src="src/renderer/ui/contextLabel.js" defer></script>
+    <!-- v51.9: mobile floating composer (FAB → real input + SEND on narrow viewports). -->
+    <script src="src/renderer/ui/mobileComposer.js" defer></script>
+</head>
+<body>
+    <header id="titlebar" class="titlebar" aria-label="Window title bar">
+        <div class="titlebar-drag" aria-hidden="true"></div>
+        <div class="titlebar-controls">
+            <button type="button" id="win-minimize" class="titlebar-btn" title="Minimize" aria-label="Minimize">&#8722;</button>
+            <button type="button" id="win-maximize" class="titlebar-btn" title="Maximize" aria-label="Maximize">&#9633;</button>
+            <button type="button" id="win-close" class="titlebar-btn titlebar-btn--close" title="Close" aria-label="Close">&#10005;</button>
+        </div>
+    </header>
+
+    <div class="app-workspace">
+    <!-- Mobile-only: tap to slide in the settings sidebar as an off-canvas overlay. -->
+    <button id="hamburger-btn" class="hamburger-btn" title="Settings" aria-label="Open settings">☰</button>
+    <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+
+    <div id="sidebar">
+        <div class="sidebar-topbar">
+            <div class="as-rain" aria-hidden="true"></div>
+            <div class="as-brand">
+                <span id="resource-status-dot" class="status-dot" title="Resource Status: Healthy"></span>
+                <h1 class="as-wordmark" data-text="AGENT SMITH RELOADED">AGENT SMITH RELOADED</h1>
+                <span id="app-version" class="as-version">v54.3.0</span>
+            </div>
+            <div class="as-subline">
+                <span class="as-tag">SYSTEM&nbsp;AGENT&nbsp;·&nbsp;LOCAL</span>
+                <span class="as-beam" aria-hidden="true"></span>
+            </div>
+        </div>
+
+        <div id="auth-user-info" class="sb-user">
+            <span id="current-user-display" class="sb-user-name">Not Logged In</span>
+            <div class="sb-user-actions">
+                <button id="admin-panel-btn" class="test-btn sb-admin-btn" style="display: none;">ADMIN</button>
+                <button id="logout-btn" class="test-btn">LOGOUT</button>
+            </div>
+        </div>
+
+        <!-- COCKPIT — the handful of controls you touch every run, always visible.
+             Everything heavier lives in the collapsible drawers below. The segmented
+             control + chips DRIVE the hidden checkboxes app.js binds to
+             (see src/renderer/ui/modeBar.js). -->
+        <div class="cockpit">
+            <div class="mode-bar" role="group" aria-label="Operating mode">
+                <!-- v51.2 PER-MESSAGE ROUTING: one conversation, two run types — the task
+                     classifier (src/shared/taskClassifier.js) sends detected CODING tasks to
+                     the main-process Code engine and everything else (chat + agent work) to
+                     the Agent Mode chat path with host-control tools. `code:` / `agent:`
+                     prefix forces a route. -->
+                <button type="button" class="mode-seg active" data-mode="code" title="Auto-routing: coding tasks run Code Mode, everything else runs the agent chat path — shell, files anywhere, processes, web">AGENT SMITH</button>
+            </div>
+            <p id="agent-mode-hint" class="mode-hint" style="display: none;">Full host control: shell, files, web browser, processes.</p>
+            <p id="code-mode-hint" class="mode-hint">Auto-routing — coding tasks get the build pipeline; chat and agent work stay in the conversation. `code:` / `agent:` prefix forces a route.</p>
+
+            <!-- Active model. The project-folder picker now lives as an icon next to
+                 the attachment button in the input bar (saves cockpit space). -->
+            <div class="ctx-card">
+                <label class="ctx-row ctx-model" title="Active model">
+                    <span class="ctx-ico" aria-hidden="true">▮</span>
+                    <select id="model-select" class="ctx-select">
+                        <option value="" disabled selected>Scanning…</option>
+                    </select>
+                </label>
+                <!-- v52.3: UNLOAD ALL — one click frees every model currently loaded in
+                     LM Studio (VRAM back to zero). Runs against the local management API
+                     via main-process IPC, so it works from desktop and mobile web alike. -->
+                <button type="button" id="unload-all-btn" class="ctx-row ctx-unload" title="Unload every model currently loaded in LM Studio — frees VRAM">
+                    <span class="ctx-ico" aria-hidden="true">⏏</span>
+                    <span class="ctx-unload-label">UNLOAD ALL MODELS</span>
+                </button>
+            </div>
+
+            <!-- Run modifiers — quiet until active. -->
+            <div class="chip-row" aria-label="Quick toggles">
+                <button type="button" class="mode-chip" data-toggle="memory-toggle" title="Cross-session persistent memory">◈ MEM <span id="memory-count-badge" class="memory-count-badge">[0]</span></button>
+                <button type="button" class="mode-chip" data-toggle="image-gen-toggle" title="Image generation — when on, ask Smith to make an image and he renders it locally (Vulkan GPU)">🎨 IMG</button>
+            </div>
+
+            <!-- Hardware Guard — always-visible compact telemetry + emergency reset.
+                 Live colours: green ok, amber >80%, red high pressure. -->
+            <div id="hardware-monitor" class="hw-strip" title="Live hardware — system RAM, GPU VRAM, GPU load">
+                <div class="hw-grid">
+                    <span class="hw-k">RAM</span><span id="ram-info" class="hw-v">—</span><span class="hw-bar"><span id="ram-bar-fill" class="hw-bar-fill"></span></span>
+                    <span class="hw-k">VRAM</span><span id="vram-info" class="hw-v">—</span><span class="hw-bar"><span id="vram-bar-fill" class="hw-bar-fill"></span></span>
+                    <span class="hw-k">GPU</span><span id="gpu-load" class="hw-v">—</span><span class="hw-bar hw-bar--blank"></span>
+                </div>
+                <button id="hard-reset-btn" class="hw-reset-mini" title="Stops AI backends, frees GPU VRAM, and restarts Agent Smith (3–5s)">⟳ GPU RESET</button>
+            </div>
+        </div>
+
+        <!-- Real inputs the controls above drive; hidden so app.js wiring stays intact. -->
+        <div class="sr-only" aria-hidden="true">
+            <input type="checkbox" id="code-mode-toggle">
+            <input type="checkbox" id="agent-toggle">
+            <!-- PLAN + GRIND are always on (no UI chip); ISO is always off — enforced in app.js getters. -->
+            <input type="checkbox" id="code-plan-approval-toggle" checked>
+            <input type="checkbox" id="code-grind-toggle" checked>
+            <input type="checkbox" id="code-isolated-toggle">
+            <input type="checkbox" id="memory-toggle" checked>
+            <!-- v51.7: image generation (stable-diffusion.cpp / Vulkan). Driven by the 🎨 IMG chip. -->
+            <input type="checkbox" id="image-gen-toggle">
+        </div>
+
+        <!-- Collapsible settings. Fold state persists per data-section. -->
+        <div id="sidebar-settings" class="sidebar-settings">
+
+            <section class="xk-section collapsed" data-section="advanced">
+                <header class="xk-section-header"><span class="xk-section-title">ADVANCED</span><span class="xk-chevron">▾</span></header>
+                <div class="xk-section-body">
+
+            <section class="xk-section xk-subsection collapsed" data-section="tuning">
+                <header class="xk-section-header"><span class="xk-section-title">TUNING</span><span class="xk-chevron">▾</span></header>
+                <div class="xk-section-body">
+                    <div class="param-group">
+                        <label class="chip-note" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+                            <input type="checkbox" id="auto-tune-toggle" checked>
+                            Auto-tune for model + hardware
+                        </label>
+                        <div id="runtime-profile-chip" class="chip-note" style="margin-bottom:0.5rem;"></div>
+                        <!-- Manual tuning — hidden while Auto-tune is on (the default); revealed by app.js syncAutoTuneVisibility() when Auto-tune is off. -->
+                        <div id="manual-tuning-fields">
+                            <div class="param-row"><label for="temp-slider">Temperature</label><span class="param-val" id="temp-val">0.7</span></div>
+                            <input type="range" id="temp-slider" min="0.0" max="2.0" step="0.1" value="0.7">
+                            <!-- v52.7: the "Thinking Steps" (max-turns) slider is GONE — turns are
+                                 now infinite in every mode. A run ends only when the model stops,
+                                 the user hits Stop, or a stuck-detection guard fires (repeated
+                                 errors / no progress). There is no per-run step cap to tune. -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="xk-section xk-subsection collapsed" data-section="imagegen">
+                <header class="xk-section-header"><span class="xk-section-title">IMAGE GEN</span><span class="xk-chevron">▾</span></header>
+                <div class="xk-section-body">
+                    <!-- v51.7: local image generation (stable-diffusion.cpp, Vulkan — AMD works without ROCm). -->
+                    <div id="imagegen-status-line" class="chip-note">Loading…</div>
+
+                    <div class="param-group">
+                        <label class="chip-note" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+                            <input type="checkbox" id="imagegen-enabled-check"> Enable image generation (🎨 IMG)
+                        </label>
+                    </div>
+
+                    <div class="param-group">
+                        <div class="sub-head" style="margin-bottom:0.4rem;">Models</div>
+                        <div id="imagegen-model-list" class="sb-muted-list">No models detected.</div>
+                        <p class="chip-note" style="margin-top:0.3rem;">First run auto-downloads the default model (Juggernaut XL v9, ~4.3 GB). Import your own .gguf to use it instead — a complete SD/SDXL file (UNet+CLIP+VAE) works best.</p>
+                        <div class="sb-row" style="margin-top:0.5rem;">
+                            <button id="imagegen-import-btn" class="test-btn">IMPORT FILE</button>
+                            <button id="imagegen-refresh-btn" class="test-btn btn-ghost">REFRESH</button>
+                        </div>
+                        <div class="sb-row" style="margin-top:0.4rem;">
+                            <input type="text" id="imagegen-import-url" class="sb-input-flex" placeholder="https://…/model.gguf (import by URL)">
+                            <button id="imagegen-import-url-btn" class="test-btn">ADD</button>
+                        </div>
+                    </div>
+
+                    <div class="param-group" style="margin-top:0.6rem;">
+                        <div class="sub-head" style="margin-bottom:0.4rem;">Generation settings (defaults)</div>
+                        <div class="param-row"><label for="imagegen-width">Width</label><span class="param-val" id="imagegen-width-val">1024</span></div>
+                        <input type="range" id="imagegen-width" min="512" max="1536" step="64" value="1024">
+                        <div class="param-row param-row--spaced"><label for="imagegen-height">Height</label><span class="param-val" id="imagegen-height-val">1024</span></div>
+                        <input type="range" id="imagegen-height" min="512" max="1536" step="64" value="1024">
+                        <div class="param-row param-row--spaced"><label for="imagegen-steps">Steps</label><span class="param-val" id="imagegen-steps-val">25</span></div>
+                        <input type="range" id="imagegen-steps" min="10" max="60" step="1" value="25">
+                        <div class="param-row param-row--spaced"><label for="imagegen-cfg">CFG Scale</label><span class="param-val" id="imagegen-cfg-val">7.0</span></div>
+                        <input type="range" id="imagegen-cfg" min="1" max="20" step="0.5" value="7">
+                        <div class="field field--spaced">
+                            <label for="imagegen-sampler">Sampler</label>
+                            <select id="imagegen-sampler" style="width:100%;background:var(--input-bg);color:var(--text-color);border:1px solid var(--border-color);padding:6px;border-radius:4px;">
+                                <option value="euler">euler</option>
+                                <option value="euler_a">euler_a</option>
+                                <option value="dpm++_2m">dpm++ 2m</option>
+                                <option value="ddim_trailing">ddim trailing</option>
+                            </select>
+                        </div>
+                        <div class="field field--spaced">
+                            <label for="imagegen-neg-prompt">Default negative prompt</label>
+                            <input type="text" id="imagegen-neg-prompt" style="width:100%;background:var(--input-bg);color:var(--text-color);border:1px solid var(--border-color);padding:6px;border-radius:4px;">
+                        </div>
+                    </div>
+
+                    <div id="imagegen-progress-line" class="chip-note" style="display:none;margin-top:0.5rem;"></div>
+                </div>
+            </section>
+
+            <section class="xk-section xk-subsection collapsed" data-section="codeops">
+                <header class="xk-section-header"><span class="xk-section-title">CODE</span><span class="xk-chevron">▾</span></header>
+                <div class="xk-section-body">
+                    <!-- Revealed by app.js when CODE mode is active. Context Window is auto-tuned
+                         (hidden unless Auto-tune is off); the live status/readiness live here. -->
+                    <div id="code-mode-ui" class="sb-subpanel-plain" style="display: none;">
+                        <div class="param-group" id="manual-ctx-field">
+                            <div class="param-row"><label for="ctx-slider">Context Window</label><span class="param-val" id="ctx-val">8192</span></div>
+                            <input type="range" id="ctx-slider" min="2048" max="262144" step="1024" value="8192">
+                        </div>
+                        <div id="code-status-bar" class="chip-note">Code Mode idle</div>
+                        <div id="code-readiness-chip" class="chip-note" style="display:none;"></div>
+                        <div id="code-review-mount"></div>
+                    </div>
+                    <p id="code-mode-empty" class="xk-empty-note">Switch to <strong>CODE</strong> mode to build on your project.</p>
+                </div>
+            </section>
+
+            <section class="xk-section xk-subsection collapsed" data-section="connect">
+                <header class="xk-section-header"><span class="xk-section-title">CONNECT</span><span class="xk-chevron">▾</span></header>
+                <div class="xk-section-body">
+                    <div id="lms-server-container" class="field">
+                        <label for="lms-server-input">LM STUDIO (URL)</label>
+                        <input type="text" id="lms-server-input" value="http://127.0.0.1:1234">
+                    </div>
+                    <!-- v50: LM Studio is the only provider — the Kimi K3 cloud toggle + key/model fields are gone. -->
+                    <!-- Web Remote URL + WhatsApp linking now live behind the 📱 / 💬 buttons in the composer. -->
+                    <span id="host-url-display" class="sr-only">Loading...</span>
+                    <div class="sb-divider"></div>
+                    <div class="sub-head">Plugins</div>
+                    <div id="plugins-panel" class="sb-card">
+                        <div class="sb-row">
+                            <input type="text" id="plugin-install-url" class="sb-input-flex" placeholder="github.com/user/repo or URL">
+                            <button id="plugin-install-btn" class="test-btn">INSTALL</button>
+                        </div>
+                        <div id="plugin-install-status" class="chip-note" style="display:none;"></div>
+                        <div id="plugin-list" class="sb-muted-list">No plugins installed.</div>
+                    </div>
+                </div>
+            </section>
+
+                    <div class="sb-divider"></div>
+                    <div class="toggle-list">
+                        <div class="toggle-row"><label class="toggle-label"><input type="checkbox" id="local-tts-toggle"> SPEAK RESPONSES</label><button id="test-audio-btn" class="test-btn" title="Test speech output">TEST</button></div>
+                        <div class="toggle-row"><label class="toggle-label" title="Allow show_preview screenshot of screen/window (requires source picker)"><input type="checkbox" id="preview-desktop-toggle"> DESKTOP PREVIEW</label></div>
+                    </div>
+
+                    <div class="sb-divider"></div>
+                    <button id="clear-btn" class="clear-btn">WIPE MEMORY</button>
+                    <div class="btn-pair">
+                        <button id="export-btn" class="clear-btn btn-ghost">EXPORT</button>
+                        <button id="import-btn" class="clear-btn btn-ghost">IMPORT</button>
+                    </div>
+
+                    <div class="field field--spaced">
+                        <label for="sudo-input">SUDO OVERRIDE (PASS)</label>
+                        <input type="password" id="sudo-input" placeholder="••••••••">
+                    </div>
+
+                </div>
+            </section>
+        </div>
+
+        <div class="spacer"></div>
+
+        <div id="plan-chip" class="plan-chip" style="display:none;">
+            <button type="button" id="plan-chip-open" class="plan-chip-open" aria-label="Open plan">
+                <span class="plan-chip-icon">⌁</span>
+                <span class="plan-chip-label">PLAN</span>
+                <span id="plan-chip-step" class="plan-chip-step">· 0/0</span>
+                <span class="plan-chip-caret">›</span>
+            </button>
+        </div>
+        <div id="plan-drawer" class="plan-drawer" style="display:none;" aria-hidden="true">
+            <div class="plan-drawer-bar">
+                <span class="plan-drawer-title">BUILD PLAN</span>
+                <div class="plan-drawer-actions">
+                    <button type="button" id="plan-stop-btn" class="plan-exit-btn plan-stop-btn" style="display:none;" title="Stop the current Code run">STOP</button>
+                    <button type="button" id="plan-exit-btn" class="plan-exit-btn" title="Collapse this panel">EXIT</button>
+                </div>
+            </div>
+            <div id="plan-panel-mount"></div>
+        </div>
+
+        <div id="preview-chip" class="plan-chip preview-chip" style="display:none;">
+            <button type="button" id="preview-chip-open" class="plan-chip-open" aria-label="Open preview">
+                <span class="plan-chip-icon">◫</span>
+                <span class="plan-chip-label">PREVIEW</span>
+                <span id="preview-chip-label" class="plan-chip-step">· live</span>
+                <span class="plan-chip-caret">›</span>
+            </button>
+        </div>
+        <div id="preview-drawer" class="plan-drawer preview-drawer" style="display:none;" aria-hidden="true">
+            <div class="plan-drawer-bar">
+                <span class="plan-drawer-title">PREVIEW</span>
+                <button type="button" id="preview-exit-btn" class="plan-exit-btn">EXIT</button>
+            </div>
+            <div id="preview-panel-mount"></div>
+        </div>
+
+        <div class="status-indicator">
+            <div id="memory-indicator" style="display: none; color: #9d4edd; font-size: 0.7rem; margin-right: 10px; font-weight: bold;">[ NEURO-CORE SAVING... ]</div>
+            <div id="status-dot" class="dot"></div>
+            <span id="status-text">DISCONNECTED</span>
+        </div>
+        <audio id="login-welcome-audio" preload="auto" src="src/renderer/login/assets/mr.-anderson,-welcome-back,-we-missed-you-made-with-Voicemod.mp3" aria-hidden="true"></audio>
+    </div>
+
+    <div id="main-chat">
+        <div id="messages"></div>
+
+        <!-- v51.8: ALWAYS-VISIBLE image-gen progress banner (the robust download indicator).
+             The sidebar IMAGE GEN section ships collapsed, so its progress line is invisible
+             while the user watches the chat — which made first-run downloads look dead and let
+             the agent claim success over nothing. This banner sits in the main chat column,
+             above the input bar, and shows live engine/model download bytes + % (or a stall
+             warning), sampling steps, and errors. Driven by `imagegen-event` push events from
+             the main process; hidden when idle. -->
+        <div id="imagegen-banner" class="imgen-banner" style="display:none;" role="status" aria-live="polite">
+            <span class="imgen-banner__icon" id="imagegen-banner-icon">⬇</span>
+            <div class="imgen-banner__body">
+                <div class="imgen-banner__title" id="imagegen-banner-title">Preparing image engine…</div>
+                <div class="imgen-banner__bar"><span class="imgen-banner__fill" id="imagegen-banner-fill"></span></div>
+                <div class="imgen-banner__meta" id="imagegen-banner-meta"></div>
+            </div>
+        </div>
+
+        <!-- Onboarding / empty state: shown only when there are no messages yet.
+             Sits over the animated background; app.js toggles its visibility. -->
+        <div id="empty-state" class="empty-state">
+            <div class="empty-state__inner">
+                <div class="empty-state__mark">AGENT&nbsp;SMITH&nbsp;RELOADED<span class="es-cursor">_</span></div>
+                <p class="empty-state__tag">Local machine. Absolute order. Purpose. Chat, search, and build whole projects — under inevitable control, Mr. Anderson.</p>
+                <div class="empty-state__chips">
+                    <button type="button" class="suggest-chip" data-build="1" data-prompt="Plan and build a small Python CLI to-do app with persistent storage and tests.">⌁&nbsp; Plan &amp; build a project</button>
+                    <button type="button" class="suggest-chip" data-prompt="Explain what this code does and suggest improvements:&#10;&#10;">≡&nbsp; Explain some code</button>
+                    <button type="button" class="suggest-chip" data-prompt="Search the web for ">⌕&nbsp; Search the web</button>
+                    <button type="button" class="suggest-chip" data-prompt="Remember that ">✦&nbsp; Remember a fact</button>
+                </div>
+                <p class="empty-state__hint">Pick a starter, or type a command below ↓</p>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <div id="verify-popup-host" class="verify-popup-host" aria-live="polite"></div>
+            <input type="file" id="file-input" style="display: none;">
+            <!-- Hidden: app.js writes the path here; contextLabel.js mirrors it onto
+                 the folder button below (label + tooltip). Kept in the DOM, never shown. -->
+            <p id="workspace-status" class="ctx-path" style="display: none;"></p>
+            <div id="attachments-bar" class="attachments-bar"></div>
+            <div class="input-controls">
+                <div class="io-icon-col" aria-label="Workspace and phone">
+                    <button id="phone-connect-btn" class="io-icon-btn io-icon-btn--compact" title="Open Agent Smith on your phone — scan a QR to open the web UI">📱</button>
+                    <button id="here-i-am-btn" class="io-icon-btn io-icon-btn--compact" title="Set the project folder Agent Smith works in">📁<span class="ws-pin-label sr-only">Set project folder</span></button>
+                </div>
+                <div class="io-icon-col" aria-label="WhatsApp and attach">
+                    <button id="wa-link-btn" class="io-icon-btn io-icon-btn--compact" title="Link WhatsApp — send & receive messages">💬</button>
+                    <button id="attach-btn" class="io-icon-btn io-icon-btn--compact" title="Attach File">📎</button>
+                </div>
+                <textarea id="user-input" placeholder="Enter transmission, Mr. Anderson…" disabled></textarea>
+                <button id="send-btn" disabled>SEND</button>
+                <button id="stop-btn" style="display: none; border-color: #da3633; color: #da3633;">STOP</button>
+            </div>
+        </div>
+    </div>
+    </div>
+
+    <!-- Login Overlay -->
+    <div id="login-overlay" class="as-login">
+        <div class="as-login-card" style="width: 320px; padding: 26px 24px; background: var(--sidebar-bg); border: 1px solid var(--accent-color); border-radius: 10px; box-shadow: 0 0 28px var(--accent-glow);">
+            <div class="as-login-brand">
+                <span class="as-wordmark" data-text="AGENT SMITH RELOADED">AGENT SMITH RELOADED</span>
+                <span class="as-login-sub">LOCAL SYSTEM · ACCESS REQUIRED</span>
+            </div>
+            <h1 id="auth-title" class="as-login-mode" style="text-align: center; margin: 4px 0 20px; font-size: 0.8rem;">LOGIN REQUIRED</h1>
+            <div id="login-fields">
+                <label for="auth-username">USERNAME</label>
+                <input type="text" id="auth-username" style="width: 100%; background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); padding: 8px; border-radius: 4px; margin-bottom: 15px; outline: none; box-sizing: border-box;">
+                <label for="auth-password">PASSWORD</label>
+                <input type="password" id="auth-password" style="width: 100%; background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); padding: 8px; border-radius: 4px; margin-bottom: 20px; outline: none; box-sizing: border-box;">
+                <button id="login-btn" style="width: 100%; padding: 10px; margin-bottom: 10px;">SIGN IN</button>
+                <p id="auth-switch-text" style="text-align: center; font-size: 0.8rem; cursor: pointer; color: #8b949e;">New here? <span style="color: var(--accent-color);">Create account</span></p>
+            </div>
+            <div id="register-fields" style="display: none;">
+                <label for="reg-username">USERNAME</label>
+                <input type="text" id="reg-username" style="width: 100%; background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); padding: 8px; border-radius: 4px; margin-bottom: 15px; outline: none; box-sizing: border-box;">
+                <label for="reg-password">PASSWORD</label>
+                <input type="password" id="reg-password" style="width: 100%; background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); padding: 8px; border-radius: 4px; margin-bottom: 15px; outline: none; box-sizing: border-box;">
+                <label for="reg-password-confirm">CONFIRM PASSWORD</label>
+                <input type="password" id="reg-password-confirm" style="width: 100%; background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); padding: 8px; border-radius: 4px; margin-bottom: 20px; outline: none; box-sizing: border-box;">
+                <button id="register-submit-btn" style="width: 100%; padding: 10px; margin-bottom: 10px;">REGISTER</button>
+                <p id="reg-switch-text" style="text-align: center; font-size: 0.8rem; cursor: pointer; color: #8b949e;">Already have an account? <span style="color: var(--accent-color);">Sign In</span></p>
+            </div>
+            <p id="auth-error" style="color: #da3633; font-size: 0.8rem; text-align: center; margin-top: 10px; min-height: 1.2rem;"></p>
+        </div>
+    </div>
+
+    <!-- Admin Panel Overlay -->
+    <div id="admin-overlay">
+        <div style="width: 400px; max-width: 90%; padding: 20px; background: var(--sidebar-bg); border: 1px solid #ffb703; border-radius: 8px; box-shadow: 0 0 20px rgba(255, 183, 3, 0.5); max-height: 80vh; overflow-y: auto;">
+            <h1 style="text-align: center; margin-bottom: 20px; font-size: 1.2rem; color: #ffb703; text-shadow: none;">ADMIN PANEL</h1>
+            <p style="font-size: 0.8rem; color: #8b949e; margin-bottom: 15px; text-align: center;">Manage User Privileges</p>
+            <div id="admin-user-list" style="display: flex; flex-direction: column; gap: 10px;">
+                <!-- User rows injected here -->
+            </div>
+            <button id="close-admin-btn" style="width: 100%; padding: 10px; margin-top: 20px; border-color: var(--border-color); color: var(--text-color);">CLOSE</button>
+        </div>
+    </div>
+
+    <!-- v52: Mobile floating composer — a persistent FAB (bottom-right) that expands into
+         the REAL chat input + SEND button on narrow viewports, where the bottom .input-area
+         can be pushed off-screen / unreachable. The expanded bar carries its own ✕ close
+         button (#mc-close): in v51.9 opening hid the FAB — the only toggle — so the sheet
+         could never be dismissed and covered the chat forever. Body-level so the mobile
+         sidebar transform can't trap it; hidden entirely above 768px (see base.css). -->
+    <div id="mobile-composer" hidden>
+        <button type="button" id="mc-fab" class="mc-fab" aria-label="Open chat input" title="Chat">💬</button>
+        <div id="mc-bar" class="mc-bar">
+            <button type="button" id="mc-close" class="mc-close" aria-label="Close chat input" title="Close">✕</button>
+        </div>
+    </div>
+
+    <!-- Centered popup (body-level so mobile sidebar transform can't trap it). -->
+    <div id="qr-modal" class="qr-modal" role="dialog" aria-modal="true" aria-labelledby="qr-title">
+        <div class="qr-modal__panel">
+            <div id="qr-container">
+                <div id="qr-title" class="qr-title">CONNECT A DEVICE</div>
+                <img id="qr-image" src="" alt="QR Code">
+                <p id="qr-caption">Scan with WhatsApp</p>
+                <div id="qr-detail" class="qr-detail"></div>
+            </div>
+            <button type="button" class="close-modal" id="close-qr">CLOSE</button>
+        </div>
+    </div>
+
+    <script src="node_modules/marked/marked.min.js"></script>
+    <!-- Renderer agent modules, bundled by esbuild (npm run build:renderer). -->
+    <script src="dist/renderer/bundle.js"></script>
+    <script src="src/renderer/app.js"></script>
+</body>
+</html>

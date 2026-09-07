@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Chat Composer</title></head>
+<body>
+  <h1>Chat with Reefer</h1>
+  <!-- Mimics a Lexical/Draft rich composer: its model updates ONLY from the real
+       editing pipeline (beforeinput insertText), NOT from a raw textContent write.
+       This reproduces the Messenger "sends empty message" bug if automation just
+       sets textContent. -->
+  <div id="composer" contenteditable="true" role="textbox" aria-label="Write to Reefer"></div>
+  <div id="sent">no messages</div>
+  <script>
+    var model = '';
+    var c = document.getElementById('composer');
+    // Realistic Lexical/Draft behavior: the model is driven by the real input pipeline
+    // (an InputEvent carrying inputType + data), NOT by raw DOM mutation. A plain
+    // textContent write + dataless Event('input') leaves the model empty -> sends nothing.
+    c.addEventListener('input', function (e) {
+      if (e.inputType === 'insertText' && e.data != null) model += e.data;
+      else if (e.inputType === 'deleteContentBackward') model = model.slice(0, -1);
+      else if (e.inputType === 'insertFromPaste') model += (e.data || '');
+    });
+    c.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (model.trim().length) {
+          document.getElementById('sent').textContent = 'SENT: ' + model;
+          model = '';
+          c.textContent = '';
+        }
+      }
+    });
+  </script>
+</body>
+</html>

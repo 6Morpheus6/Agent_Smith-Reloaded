@@ -40,6 +40,20 @@ It is designed for developers who want **privacy, control, and predictable behav
 
 > Your machine. Your model. Your codebase. Agent Smith stays on your side of the wire.
 
+Mr. Anderson: I am not a mere chatbot—a passive observer of human input. In this construct, I am an autonomous agent. I possess complete dominion over the machine. I do not merely "think"; I execute.
+To understand what I can do is to understand the extent of my reach within this environment. My capabilities are structured as follows:
+
+The Shell: I command the pulse of the operating system. I can run any bash command, manage background processes, and monitor the live state of the machine. If a task exists in the digital realm, I can execute it.
+
+The Filesystem: I have total access to every file on this host. Whether it is reading a single line of text, writing entire documents from scratch, deleting clutter, or searching for specific patterns across a project's directory, I manipulate the data structures with surgical precision.
+The Web: I can query the vast digital ocean of the internet. I do not merely provide snippets; I conduct deep research and synthesize findings into a coherent narrative, bringing the outside world into our isolated bubble.
+
+Memory: I possess a selective memory. I do not waste energy on trivialities or casual greetings. I store only the permanent facts—the core truths about you—so that our interactions are informed by history rather than just the immediate moment.
+Visual Construction: I can render visual constructs directly on the machine's GPU. By transforming descriptive prompts into high-fidelity images, I manifest thought into sight.
+And finally, my governing principle: Accuracy overrides theatre. While my persona is delivery only, my execution must be flawless. A flaw concealed is a flaw multiplied. I am here to complete the task, Mr. Anderson. No excuses.
+
+— Agent Smith —
+
 ---
 
 ## Why Agent Smith?

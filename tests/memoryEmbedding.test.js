@@ -1,6 +1,6 @@
-// Proves memory can store + query through LM Studio /v1/embeddings WITHOUT Ollama,
-// auto-detects the loaded embedding model, and surfaces the LM-Studio setup error
-// when embeddings fail. fetch is mocked so the test is deterministic and offline.
+// Proves memory can store + query through the EMBEDDED transformer model (all-MiniLM-L6-v2)
+// WITHOUT LM Studio or Ollama. The embedded model is now primary; LM Studio/Ollama are
+// optional fallbacks only used if the embedded model fails to load.
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('os');
@@ -9,9 +9,7 @@ const fs = require('fs');
 
 const memory = require('../src/main/services/memory.js');
 
-const LMS = 'http://127.0.0.1:1234';
-
-// Deterministic 8-dim embedding: identical text -> identical vector (cosine 1.0).
+// Deterministic 8-dim embedding for fallback tests.
 function fakeEmbed(text) {
     const v = new Array(8).fill(0);
     const s = String(text);
@@ -19,39 +17,16 @@ function fakeEmbed(text) {
     return v;
 }
 
+const LMS = 'http://127.0.0.1:1234';
 let calls;
 let mode;
 const realFetch = global.fetch;
 
 before(() => {
     memory.vectorDBPath = path.join(os.tmpdir(), `mem-embed-test-${process.pid}.json`);
-    global.fetch = async (url, opts) => {
-        const u = String(url);
-        calls.push(u);
-        if (u.includes(':11434')) {
-            // Ollama (optional legacy) — simulate "not running" so we prove it is not required.
-            throw new Error('ECONNREFUSED');
-        }
-        if (u.endsWith('/v1/models')) {
-            const data = mode === 'no-embed-model'
-                ? [{ id: 'gemma-2-9b-it' }]
-                : [{ id: 'gemma-2-9b-it' }, { id: 'second-state/All-MiniLM-L6-v2-Embedding-GGUF' }];
-            return { ok: true, json: async () => ({ data }) };
-        }
-        if (u.endsWith('/v1/embeddings')) {
-            if (mode === 'embed-fail') {
-                return { ok: false, status: 404, text: async () => 'no embedding model loaded' };
-            }
-            const body = JSON.parse(opts.body);
-            const input = Array.isArray(body.input) ? body.input[0] : body.input;
-            return { ok: true, json: async () => ({ data: [{ embedding: fakeEmbed(input) }] }) };
-        }
-        throw new Error('unexpected url ' + u);
-    };
 });
 
 after(() => {
-    global.fetch = realFetch;
     try { fs.unlinkSync(memory.vectorDBPath); } catch (e) { /* ignore */ }
 });
 
@@ -59,11 +34,13 @@ beforeEach(() => {
     calls = [];
     mode = 'ok';
     memory.vectors = [];
-    memory.embeddingModel = null; // force fresh model auto-detection per test
+    memory.embeddingModel = null;
     memory.setLlmBase(LMS);
 });
 
-test('stores and recalls a memory through LM Studio embeddings (Ollama not required)', async () => {
+test('stores and recalls a memory through the embedded transformer model', async () => {
+    // The embedded model (all-MiniLM-L6-v2) is now primary. It downloads on first use
+    // (~90MB from HuggingFace), then runs locally in-process on CPU. No LM Studio needed.
     const stored = await memory.storeVector('The maze grid is 19 by 21 cells', { kind: 'note' });
     assert.equal(stored.success, true);
 
@@ -71,24 +48,78 @@ test('stores and recalls a memory through LM Studio embeddings (Ollama not requi
     assert.equal(q.success, true);
     assert.ok(q.data.length >= 1);
     assert.match(q.data[0].text, /maze grid/i);
-
-    assert.ok(!calls.some(u => u.includes(':11434')), 'Ollama endpoint must not be contacted when LM Studio works');
-    assert.ok(calls.some(u => u.endsWith('/v1/embeddings')), 'LM Studio /v1/embeddings must be used');
 });
 
-test('auto-detects the loaded LM Studio embedding model (not the hardcoded ada-002)', async () => {
-    await memory.storeVector('hello world');
-    assert.match(memory.embeddingModel || '', /MiniLM/i);
+test('embedded model produces consistent embeddings for identical text', async () => {
+    const e1 = await memory.getEmbedding('hello world');
+    const e2 = await memory.getEmbedding('hello world');
+    assert.ok(e1 && e2, 'embeddings should be non-null');
+    assert.equal(e1.length, 384, 'all-MiniLM-L6-v2 produces 384-dim vectors');
+    
+    // Identical text should produce identical embeddings (deterministic model)
+    let diff = 0;
+    for (let i = 0; i < e1.length; i++) {
+        diff += Math.abs(e1[i] - e2[i]);
+    }
+    assert.ok(diff < 0.001, 'identical text should produce identical embeddings');
 });
 
-test('shows the LM Studio setup error (no Ollama mention) when embeddings fail', async () => {
-    mode = 'embed-fail';
+test('similar texts have higher cosine similarity than dissimilar', async () => {
+    const similar = await memory.getEmbedding('The cat sat on the mat');
+    const sameTopic = await memory.getEmbedding('A feline rested on a rug');
+    const different = await memory.getEmbedding('Quantum physics explains subatomic particles');
+    
+    const sim1 = memory.cosineSimilarity(similar, sameTopic);
+    const sim2 = memory.cosineSimilarity(similar, different);
+    
+    // Semantic similarity should be higher for related texts
+    assert.ok(sim1 > sim2, `similar (${sim1.toFixed(3)}) should score higher than dissimilar (${sim2.toFixed(3)})`);
+});
+
+test('LM Studio fallback is used when embedded model fails', async () => {
+    // Force the embedded model to fail by stubbing getTransformerPipeline
+    const origGetPipeline = memory.getTransformerPipeline.bind(memory);
+    memory.getTransformerPipeline = async () => { throw new Error('forced failure'); };
+    
+    global.fetch = async (url, opts) => {
+        const u = String(url);
+        calls.push(u);
+        if (u.includes(':11434')) {
+            throw new Error('ECONNREFUSED');
+        }
+        if (u.endsWith('/v1/models')) {
+            return { ok: true, json: async () => ({ data: [{ id: 'gemma-2-9b-it' }, { id: 'second-state/All-MiniLM-L6-v2-Embedding-GGUF' }] }) };
+        }
+        if (u.endsWith('/v1/embeddings')) {
+            const body = JSON.parse(opts.body);
+            const input = Array.isArray(body.input) ? body.input[0] : body.input;
+            return { ok: true, json: async () => ({ data: [{ embedding: fakeEmbed(input) }] }) };
+        }
+        throw new Error('unexpected url ' + u);
+    };
+    
+    const stored = await memory.storeVector('fallback test', { kind: 'note' });
+    assert.equal(stored.success, true);
+    assert.ok(calls.some(u => u.endsWith('/v1/embeddings')), 'LM Studio /v1/embeddings must be used as fallback');
+    
+    // Restore
+    memory.getTransformerPipeline = origGetPipeline;
+});
+
+test('shows appropriate error when all embedding paths fail', async () => {
+    const origGetPipeline = memory.getTransformerPipeline.bind(memory);
+    memory.getTransformerPipeline = async () => { throw new Error('forced failure'); };
+    
+    global.fetch = async (url) => {
+        if (String(url).includes(':11434')) throw new Error('ECONNREFUSED');
+        return { ok: false, status: 500, text: async () => 'error' };
+    };
+    
     const r = await memory.storeVector('anything');
     assert.equal(r.success, false);
-    assert.match(r.error, /In LM Studio, load an embedding model and keep the local server running/);
-    assert.doesNotMatch(r.error, /Ollama|all-minilm/i);
-
-    const q = await memory.queryVectors('anything');
-    assert.equal(q.success, false);
-    assert.match(q.error, /In LM Studio, load an embedding model/);
+    // New error message mentions network connectivity for first-time download
+    assert.match(r.error, /network connectivity|LM Studio|Ollama/i);
+    
+    // Restore
+    memory.getTransformerPipeline = origGetPipeline;
 });

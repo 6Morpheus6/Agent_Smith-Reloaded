@@ -14,6 +14,7 @@
  * the only edit is `currentPlanId` -> `state.currentPlanId`.
  */
 const { assessCommand, blockedResult } = require('../../shared/commandPolicy.js');
+const { foregroundTimeoutFor } = require('../../shared/longBuildPolicy.js');
 const { assessPathMutation, blockedPathResult } = require('../../shared/pathPolicy.js');
 
 module.exports = function registerAgentIpc(ipcMain, deps) {
@@ -93,7 +94,10 @@ module.exports = function registerAgentIpc(ipcMain, deps) {
             // 90s, not 5min: a foreground command that blocks (GUI app, server, watcher)
             // should fail fast instead of freezing the whole turn for minutes. GUI launches
             // and long tasks belong in is_background:true (returns instantly with a job id).
-            const FG_TIMEOUT_MS = 90000;
+            // v55.2 — recognized long operations (builds, `sudo apt upgrade`, …) get their
+            // build-sized window from longBuildPolicy instead of dying at 90 s; everything
+            // else keeps the fast-fail default.
+            const FG_TIMEOUT_MS = foregroundTimeoutFor('run_command', { command }, 90000);
             const onDone = (error, stdout, stderr) => {
                 if (error && error.killed) {
                     resolve({ error: `Command timed out after ${FG_TIMEOUT_MS / 1000}s and was killed. To open a GUI app (browser/editor) or run a long task (server/build/watcher), call run_shell_command with is_background:true.`, stdout, stderr });

@@ -16,11 +16,12 @@
  */
 'use strict';
 
-// v51.5: pairs with the app-wide min-ctx gate (src/shared/ctxGate.js, default 64000). A model
-// loaded below 64K is already blocked at send time — Code Mode therefore never runs on a tiny
-// window and its request floor can sit right at that boundary. The cap keeps local inference
-// responsive: the full loaded window (often 131K+) would let fitBudget pack prompts far larger
-// than a 20-30B GGUF on consumer VRAM can chew through per turn. Env-overridable both ways.
+// v51.5: pairs with the app-wide min-ctx gate (src/shared/ctxGate.js, default 32000 since v55.4).
+// The floor below is Code Mode's own request minimum — it clamps WITHIN whatever window the model
+// actually has loaded (see clampCodeNumCtx), so a smaller loaded window simply requests less;
+// over-requesting never happens. The cap keeps local inference responsive: the full loaded window
+// (often 131K+) would let fitBudget pack prompts far larger than a 20-30B GGUF on consumer VRAM
+// can chew through per turn. Env-overridable both ways.
 const CODE_MIN_NUM_CTX = Number(process.env.XK_CODE_MIN_NUM_CTX) || 65536;
 const CODE_MAX_NUM_CTX = Number(process.env.XK_CODE_MAX_NUM_CTX) || 98304;
 

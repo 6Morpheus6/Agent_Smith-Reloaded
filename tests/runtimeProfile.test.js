@@ -22,7 +22,9 @@ test('coder + medium VRAM gets higher maxTurns and moderate ctx', () => {
     });
     assert.equal(p.maxTurns, 50);
     assert.equal(p.codeTemperature, 0.15);
-    assert.ok(p.numCtx >= 8192 && p.numCtx <= 24576);
+    // v55.9.1: the computed 18432 is floored at the app-wide minimum (32000) — a profile may
+    // never target a window Agent Smith can't use.
+    assert.equal(p.numCtx, 32000);
     assert.match(p.summary, /ctx/i);
 });
 
@@ -31,8 +33,26 @@ test('general 7B + low VRAM caps context', () => {
         modelId: 'llama-3.2-7b-instruct',
         telemetry: { memory: { total: 6144 } }
     });
-    assert.ok(p.numCtx <= 12288);
+    // v55.9.1: the low-VRAM cap (8192) no longer wins — the app-wide minimum ctx floor does,
+    // because below it the send gate blocks every message anyway. The VRAM reality is still
+    // reported as a warning so the user knows 32K may not fit on this card.
+    assert.equal(p.numCtx, 32000);
     assert.ok(p.warnings.some(w => /coder model/i.test(w)));
+});
+
+test('v55.9.1: profile ctx is floored at the app-wide minimum (env-overridable)', () => {
+    // Default floor: even a tiny-VRAM, small-model profile lands exactly on 32000.
+    const p = buildRuntimeProfile({ modelId: 'phi-4-mini', telemetry: { memory: { total: 6144 } } });
+    assert.equal(p.numCtx, 32000);
+    // The floor follows ctxGate.minCtx() — raise it and the profile follows.
+    process.env.XK_MIN_CTX = '49152';
+    try {
+        const raised = buildRuntimeProfile({ modelId: 'phi-4-mini', telemetry: { memory: { total: 6144 } } });
+        assert.equal(raised.numCtx, 49152);
+        // A profile already ABOVE the floor is untouched by it.
+        const big = buildRuntimeProfile({ modelId: 'qwen2.5-32b-instruct', telemetry: { memory: { total: 32768 } } });
+        assert.ok(big.numCtx >= 49152);
+    } finally { delete process.env.XK_MIN_CTX; }
 });
 
 test('32B + high VRAM scales context down', () => {

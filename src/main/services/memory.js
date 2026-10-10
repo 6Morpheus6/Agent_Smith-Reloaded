@@ -33,14 +33,17 @@ class MemoryManager {
         this.vectorDBPath = path.join(this.userDataPath, 'xkaliber_vectors_v29.json');
         this.vectors = this.loadJSON(this.vectorDBPath, []);
         
-        // Memory embeddings are served by LM Studio's OpenAI-compatible /v1/embeddings
-        // endpoint. Load an embedding model in LM Studio and keep its local server
-        // running; the base URL is supplied via setLlmBase() at startup.
+        // v55.1: Embedded embedding model via @xenova/transformers (all-MiniLM-L6-v2).
+        // No longer requires LM Studio or Ollama for memory embeddings — the model
+        // is bundled with the app and runs locally in-process on CPU.
+        this.transformerPipeline = null;
+        this.transformerLoading = null;
+        
+        // Legacy: LM Studio's OpenAI-compatible /v1/embeddings endpoint (optional fallback).
         this.llmEmbeddingBase = null;
-        // Embedding model id. null => auto-detect the loaded embedding model from
-        // LM Studio's /v1/models. Override with XK_EMBED_MODEL or setEmbeddingModel().
         this.embeddingModel = process.env.XK_EMBED_MODEL || null;
         this.gpuVendor = 'GENERIC';
+        
         // Optional legacy fallback only, used if it happens to be running. NOT required.
         this.ollamaUrl = 'http://127.0.0.1:11434/api';
     }
@@ -51,6 +54,53 @@ class MemoryManager {
 
     setEmbeddingModel(model) {
         this.embeddingModel = model || null;
+    }
+
+    // v55.1: Load the embedded transformer pipeline (all-MiniLM-L6-v2).
+    // Downloads the model on first use (~90MB), caches in ~/.cache/huggingface.
+    async getTransformerPipeline() {
+        if (this.transformerPipeline) return this.transformerPipeline;
+        if (this.transformerLoading) return this.transformerLoading;
+
+        console.log('MemoryManager: loading embedded embedding model (all-MiniLM-L6-v2)...');
+        this.transformerLoading = (async () => {
+            try {
+                const { pipeline } = require('@xenova/transformers');
+                // Use the same model as Ollama's all-minilm for compatibility with existing vectors
+                const pipe = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+                    cache_dir: path.join(os.homedir(), '.cache', 'huggingface'),
+                });
+                this.transformerPipeline = pipe;
+                console.log('MemoryManager: embedded embedding model loaded successfully');
+                return pipe;
+            } catch (e) {
+                console.error('MemoryManager: failed to load embedded embedding model:', e.message);
+                this.transformerLoading = null; // allow retry
+                throw e;
+            }
+        })();
+
+        try {
+            const result = await this.transformerLoading;
+            return result;
+        } catch (e) {
+            this.transformerLoading = null;
+            throw e;
+        }
+    }
+
+    // v55.1: PRIMARY embedding path — embedded transformer model.
+    // Returns a normalized 384-dim vector, or null on failure.
+    async embeddedEmbed(text) {
+        try {
+            const pipe = await this.getTransformerPipeline();
+            const output = await pipe(text, { pooling: 'mean', normalize: true });
+            // Convert Tensor to array
+            return Array.from(output.data);
+        } catch (e) {
+            console.warn('MemoryManager: embedded embedding failed:', e.message);
+            return null;
+        }
     }
 
     // Resolve which embedding model id to request from LM Studio. Prefers an explicit
@@ -81,7 +131,7 @@ class MemoryManager {
         return 'text-embedding-ada-002';
     }
 
-    // PRIMARY embedding path: LM Studio's OpenAI-compatible /v1/embeddings.
+    // LEGACY fallback: LM Studio's OpenAI-compatible /v1/embeddings.
     // Returns the vector, or null if LM Studio is unreachable or has no embedding
     // model loaded.
     async openAiEmbed(text) {
@@ -137,10 +187,15 @@ class MemoryManager {
     }
 
     async getEmbedding(text) {
-        // PRIMARY: LM Studio /v1/embeddings (load an embedding model in LM Studio).
+        // v55.1: PRIMARY — embedded transformer model (no external service needed).
+        const embeddedResult = await this.embeddedEmbed(text);
+        if (embeddedResult) return embeddedResult;
+        
+        // LEGACY fallback 1: LM Studio /v1/embeddings (if configured and running).
         const lmResult = await this.openAiEmbed(text);
         if (lmResult) return lmResult;
-        // OPTIONAL legacy fallback: Ollama, only if it happens to be running. NOT required.
+        
+        // LEGACY fallback 2: Ollama, only if it happens to be running. NOT required.
         return await this.ollamaEmbed(text);
     }
 
@@ -243,12 +298,12 @@ class MemoryManager {
                 ? { success: true }
                 : { success: false, error: 'Memory saved in memory only — the vector database could not be persisted (userData dir not writable or full). The memory will be lost on restart.' };
         }
-        return { success: false, error: "Embedding failed. In LM Studio, load an embedding model and keep the local server running." };
+        return { success: false, error: "Embedding failed. Ensure network connectivity for first-time model download, or configure LM Studio/Ollama as fallback." };
     }
 
     async queryVectors(queryText, limit = 5) {
         const queryEmbedding = await this.getEmbedding(queryText);
-        if (!queryEmbedding) return { success: false, error: "Embedding failed. In LM Studio, load an embedding model and keep the local server running." };
+        if (!queryEmbedding) return { success: false, error: "Embedding failed. Ensure network connectivity for first-time model download, or configure LM Studio/Ollama as fallback." };
 
         const results = this.vectors.map(v => ({
             ...v,

@@ -254,6 +254,92 @@ function createDefaultMiddleware(ctx) {
                 };
             }
         },
+        // v54.6 stalePatchGuard — Hermes discipline: "If an edit fails to apply, re-read the
+        // file for its current content instead of retrying the stale text." A failed write/patch
+        // on a path means the model's picture of that file is wrong; retrying blind burns turns
+        // and (for patches) can half-apply. Block further writes to that path until read_file
+        // proves the model looked again. Cleared per-path on any successful read or write.
+        {
+            name: 'stalePatchGuard',
+            async beforeTool({ session, payload }) {
+                const { name, args } = payload;
+                if (name === 'read_file') return null;
+                if (!WRITE_TOOLS.has(name)) return null;
+                const stale = session._staleWritePaths;
+                if (!stale || !stale.size) return null;
+                const rel = String(args?.path || '').replace(/\\/g, '/');
+                if (rel && stale.has(rel)) {
+                    return {
+                        veto: true,
+                        result: {
+                            error: `BLOCKED: your last write/patch of "${rel}" FAILED — your copy of this file is stale. Call read_file on it first to see its CURRENT content, then retry the edit against what you actually read. Do not re-send the same text blind.`,
+                            blockedReason: 'stale_write_retry',
+                            phaseBlocked: false
+                        }
+                    };
+                }
+                return null;
+            },
+            async afterTool({ session, payload }) {
+                const { name, args, toolResult, ok } = payload;
+                if (!session._staleWritePaths) session._staleWritePaths = new Set();
+                const stale = session._staleWritePaths;
+                const rel = String(toolResult?.relPath || args?.path || '').replace(/\\/g, '/');
+                if (!rel) return null;
+                if (name === 'read_file' && ok) { stale.delete(rel); return null; }
+                if (!WRITE_TOOLS.has(name)) return null;
+                if (ok) stale.delete(rel);
+                else stale.add(rel);
+                return null;
+            }
+        },
+        // v54.6 gatherBeforeChange — Hermes METHOD: "GATHER BEFORE CHANGING / VERIFY THE PREMISE."
+        // A run that edited files but has read NOTHING since its last edit cannot know the code it
+        // is finishing (fresh edits after a failed patch, or hallucinated context). One veto forces
+        // a read pass; then it stays out of the way.
+        {
+            name: 'gatherBeforeChange',
+            async beforeDone({ session }) {
+                if (!session.filesTouched?.length) return null;
+                if (session._gatherVetoed) return null;   // one-shot: advise once, never deadlock
+                const readsSinceEdit = Number(session._readsSinceLastEdit || 0);
+                if (readsSinceEdit > 0) return null;
+                session._gatherVetoed = true;
+                return {
+                    veto: true,
+                    messages: [
+                        'GATHER BEFORE CHANGING — you edited files but have not read any file since your last edit. Before declaring done, read back what you changed (read_file on each touched file, or grep for the symbols you wired) and confirm the pieces actually connect: imports exist, ids/selectors match, callers use the new shape. Fix anything that does not line up.'
+                    ]
+                };
+            }
+        },
+        // v54.6 backgroundJobsSettled — a run that started a background command (long build,
+        // server) must KNOW how it ended before claiming done. While any job of this run is still
+        // running, completion is refused once; the model then polls read_process_log and either
+        // fixes the failure or declares done with evidence (second pass is allowed through so an
+        // intentionally-persistent dev server can't deadlock the gate).
+        {
+            name: 'backgroundJobsSettled',
+            async beforeDone({ ctx, session }) {
+                if (!session._bgJobIds?.size) return null;
+                const jobApi = ctx?.execDeps?.jobApi || ctx?.jobApi;
+                if (typeof jobApi?.listJobs !== 'function') return null;
+                let running = [];
+                try {
+                    running = (jobApi.listJobs() || []).filter(j => session._bgJobIds.has(String(j.job_id)) && j.running);
+                } catch { return null; }
+                if (!running.length) return null;
+                const ids = running.map(j => j.job_id).join(', ');
+                if (session._jobsVetoed) return null;    // warned once — model may be keeping a server up on purpose
+                session._jobsVetoed = true;
+                return {
+                    veto: true,
+                    messages: [
+                        `BACKGROUND JOB STILL RUNNING (${ids}) — you cannot declare done while a command you backgrounded has not exited. Poll read_process_log for each job id until it reports an exit code. If it failed, read the output and fix; if it is only a server you intend to keep running, say so in your summary and finish.`
+                    ]
+                };
+            }
+        },
         // ghostTrace — optional trace hook (wired when ctx.trace present)
         {
             name: 'ghostTrace',

@@ -11,6 +11,18 @@
  *     extraction quality (query-relevant sentences win; boilerplate is penalized).
  *   - researchWeb with stubbed fetch: parallel page reads, per-page failure → snippet-only
  *     fallback, deep:false = no page reads, zero-hit search.
+ *
+ * v54.9 — DETAIL PASS: the report must carry enough material for a LONG answer (the user's
+ * complaint was "response is very short and brief"). New invariants under test:
+ *   - the engine reads EVERY top result in full by default (all 6, not just some), each at
+ *     up to ~18k readable chars;
+ *   - per page it keeps a 12-sentence findings paragraph + up to 10 facts (not 4+5);
+ *   - long findings survive into the report (3600-char cap, not 900) and are bounded above;
+ *   - the nudge demands a long answer ("at least 500 words") covering EVERY source.
+ *
+ * v55 — TRIPLE BUDGET: answers were STILL capped short (~200 words). The whole budget is
+ * tripled: 54k chars/page, 36 findings sentences + 30 facts per page, report caps 10800 /
+ * 1200, and the nudge demands "at least 1500 words". Tests assert the v55 contract.
  */
 'use strict';
 
@@ -59,12 +71,61 @@ test('buildResearchReport: no pages read → honest snippet-only note', () => {
     assert.ok(report.includes('SOURCE 1: Alpha Report — snippet A'));
 });
 
-test('buildResearchReport: caps long learned content and facts (context budget)', () => {
+test('buildResearchReport: detailed findings survive (v54.9 — no more 900-char cap)', () => {
+    // ~2000 chars of learned content must reach the report intact — v54 cut it at 900, which
+    // is exactly why final answers came back brief.
     const long = 'word '.repeat(400).trim(); // ~2000 chars
+    assert.ok(long.length > 1800 && long.length < 2200);
     const report = wt.buildResearchReport('q', fixtureResults(), [
-        { index: 0, url: 'https://alpha.test/report', title: 'Alpha Report', truncated: false, summary: long, keyFacts: [long] }
+        { index: 0, url: 'https://alpha.test/report', title: 'Alpha Report', truncated: false, summary: long, keyFacts: [] }
     ]);
-    assert.ok(report.length < 4000, `report must stay bounded (got ${report.length})`);
+    assert.ok(report.includes(long), 'a ~2k-char findings paragraph must survive verbatim');
+});
+
+test('buildResearchReport: very long learned content is still bounded (context budget)', () => {
+    const huge = 'word '.repeat(3000).trim(); // ~15000 chars — beyond the 10800-char cap
+    const report = wt.buildResearchReport('q', fixtureResults(), [
+        { index: 0, url: 'https://alpha.test/report', title: 'Alpha Report', truncated: false, summary: huge, keyFacts: [] }
+    ]);
+    assert.ok(report.length < 15000, `report must stay bounded (got ${report.length})`);
+    assert.ok(!report.includes(huge), 'over-cap findings must be capped');
+});
+
+test('buildResearchReport: long fact lines are capped per-fact', () => {
+    const hugeFact = 'fact '.repeat(360).trim(); // ~1800 chars — beyond the 1200-char cap
+    const report = wt.buildResearchReport('q', fixtureResults(), [
+        { index: 0, url: 'https://alpha.test/report', title: 'Alpha Report', truncated: false, summary: '', keyFacts: [hugeFact] }
+    ]);
+    assert.ok(!report.includes(hugeFact), 'over-cap facts must be capped');
+});
+
+test('v55 tripled detail levels: ALL top results read in full, 36-sentence findings + up to 30 facts', () => {
+    // The engine's own tuning constants (not a snapshot of arbitrary numbers — these ARE the
+    // v55 contract that fixes "answers are still capped short": every budget tripled from v54.9).
+    assert.equal(wt.RESEARCH_PAGE_COUNT, 6, 'every top result must be read in full by default');
+    assert.ok(wt.RESEARCH_PAGE_CHARS >= 54000, 'each page must be read in full (>=54k readable chars)');
+    assert.equal(wt.RESEARCH_SUMMARY_SENTENCES, 36);
+    assert.equal(wt.RESEARCH_FACTS_MAX, 30);
+    assert.ok(wt.RESEARCH_REPORT_SUMMARY_CAP >= 10800, 'findings paragraph cap tripled from v54.9');
+    assert.ok(wt.RESEARCH_REPORT_FACT_CAP >= 1200, 'per-fact line cap tripled from v54.9');
+
+    // And the machinery honors them: a page with 38 relevant sentences yields 36 in the
+    // findings paragraph and up to 30 key facts.
+    const sents = [];
+    for (let i = 1; i <= 38; i++) sents.push(`Quantum battery detail number ${i} was confirmed by researchers in 2026.`);
+    const text = sents.join(' ');
+    const summarySentences = wt.summarizePage(text, 'quantum batteries', wt.RESEARCH_SUMMARY_SENTENCES).split('.').filter(Boolean);
+    assert.ok(summarySentences.length >= 36, `findings paragraph must carry ${wt.RESEARCH_SUMMARY_SENTENCES} sentences (got ${summarySentences.length})`);
+    const facts = wt.pickKeyFacts(text, 'quantum batteries', wt.RESEARCH_FACTS_MAX);
+    assert.equal(facts.length, wt.RESEARCH_FACTS_MAX, `expected up to ${wt.RESEARCH_FACTS_MAX} facts (got ${facts.length})`);
+});
+
+test('v55 nudge demands a LONG answer (>=1500 words) covering EVERY source', () => {
+    const report = wt.buildResearchReport('quantum batteries', fixtureResults(), [
+        { index: 0, url: 'https://alpha.test/report', title: 'Alpha Report', truncated: false, summary: 'Quantum batteries reached 90% efficiency in 2026.', keyFacts: [] }
+    ]);
+    assert.match(report, /at least 1500 words/i);
+    assert.match(report, /cover EVERY source listed above/i);
 });
 
 // ── text utilities ────────────────────────────────────────────────────────────
@@ -221,5 +282,64 @@ test('researchWeb: all pages fail → report still built from snippets (honest n
         const out = await wt.researchWeb('quantum batteries');
         assert.equal(out.pagesRead, 0);
         assert.ok(out.report.includes('(None of the top pages could be read in full'));
+    } finally { global.fetch = realFetch; }
+});
+
+// ── v54.9: ALL sources must be read (the user's explicit requirement) ──────────
+
+function resultBlock(host, label) {
+    return `<div class="result results__result">
+  <div class="result__body">
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2F${host}%2Fpage">${label}</a>
+    <a class="result__snippet" href="#">Snippet about ${label.toLowerCase()}.</a>
+  </div>
+</div>`;
+}
+
+const SIX_RESULT_HTML = `<html><body>${['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta']
+    .map(h => resultBlock(`${h}.test`, h[0].toUpperCase() + h.slice(1))).join('\n')}</body></html>`;
+
+function pageBody(host, n) {
+    // Numeric finding ids — sentences must NOT contain the page-title word (e.g. "Alpha"),
+    // or isTitleEcho() correctly treats them as header echoes and filters them out.
+    const base = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta'].indexOf(host) * 100;
+    const sents = [];
+    for (let i = 1; i <= n; i++) sents.push(`Quantum battery finding ${base + i} was confirmed by researchers in 2026.`);
+    return `<html><body><p>${sents.join(' ')}</p></body></html>`;
+}
+
+test('researchWeb: reads ALL six top sources in full (v54.9 — "all sources need to be read")', async () => {
+    const realFetch = global.fetch;
+    try {
+        const routes = [{ match: 'duckduckgo.com/html', body: SIX_RESULT_HTML }];
+        for (const h of ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta']) {
+            routes.push({ match: `${h}.test/page`, body: pageBody(h, 8) });
+        }
+        global.fetch = stubFetch(routes);
+        const out = await wt.researchWeb('quantum batteries');
+        assert.equal(out.results.length, 6);
+        // Every single source was read in full — none fell back to snippet-only.
+        assert.equal(out.pagesRead, 6, `ALL six sources must be read (got ${out.pagesRead})`);
+        for (const h of ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta']) {
+            const base = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta'].indexOf(h) * 100;
+            assert.ok(out.report.includes(`Quantum battery finding ${base + 1} was confirmed by researchers in 2026.`),
+                `learned content from ${h} must reach the report`);
+        }
+        // No snippet-only section at all — everything was readable.
+        assert.ok(!out.report.includes('SNIPPET-ONLY SOURCES'), 'no source should be left unread');
+        assert.match(out.report, /Sources found: 6 · pages read in full: 6/);
+    } finally { global.fetch = realFetch; }
+});
+
+test('researchWeb: explicit pageCount still bounds reads (opt-down for fast lookups)', async () => {
+    const realFetch = global.fetch;
+    try {
+        const routes = [{ match: 'duckduckgo.com/html', body: SIX_RESULT_HTML }];
+        for (const h of ['alpha', 'beta']) routes.push({ match: `${h}.test/page`, body: pageBody(h, 8) });
+        global.fetch = stubFetch(routes);
+        const out = await wt.researchWeb('quantum batteries', { pageCount: 2 });
+        assert.equal(out.pagesRead, 2, 'pageCount opt-down must be honored');
+        // The unread sources fall back to snippet-only — the report stays honest.
+        assert.ok(out.report.includes('SNIPPET-ONLY SOURCES'));
     } finally { global.fetch = realFetch; }
 });

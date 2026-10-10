@@ -1,18 +1,19 @@
 {
   "name": "agent-smith",
-  "version": "54.3.0",
-  "description": "Agent Smith Reloaded v54.3 — Generation timers hidden: the per-second elapsed clocks (chat pulse badge + Code Mode status bar) were multiple writers repainting the same line at once, so they jumped in and out; static '⚡ generating' / '⏳ processing prompt…' state remains.",
-  "homepage": "https://github.com/dreammuse/agent-smith",
+  "version": "56.0.0",
+  "description": "Agent Smith Reloaded v56 — updatable AppImage: the Linux AppImage now ships with a gh-releases-zsync update channel baked into its header (plus the matching .AppImage.zsync delta file), so users can get incremental in-place updates from GitHub Releases instead of re-downloading the whole ~290MB image. Carries forward v55.9.2 explicit context control (APPLY button + no 32K snap-back).",
+  "homepage": "https://github.com/YOUR_GITHUB_USERNAME/agent-smith",
   "main": "main.js",
   "author": {
     "name": "Agent Smith",
-    "email": "dreammuseltd@gmail.com"
+    "email": "YOUR_EMAIL@example.com"
   },
   "scripts": {
     "prestart": "node scripts/check-native.js && node scripts/build-renderer.js",
     "start": "electron .",
     "predist": "node scripts/check-native.js && node scripts/build-renderer.js",
     "dist": "electron-builder",
+    "dist:updatable": "npm run dist && bash scripts/build-updatable-appimage.sh",
     "fix-native": "node scripts/check-native.js",
     "test": "node scripts/run-unit-tests.js",
     "harness-eval-regression": "node scripts/run-unit-tests.js tests/harness-eval/regression",
@@ -31,6 +32,7 @@
     "esbuild": "^0.28.0"
   },
   "dependencies": {
+    "@xenova/transformers": "^2.17.2",
     "bcryptjs": "^3.0.3",
     "fast-glob": "^3.3.2",
     "highlight.js": "^11.9.0",
@@ -69,6 +71,12 @@
       "run.cmd"
     ],
     "asar": true,
+    "extraResources": [
+      {
+        "from": "resources/piper",
+        "to": "piper"
+      }
+    ],
     "linux": {
       "target": [
         {

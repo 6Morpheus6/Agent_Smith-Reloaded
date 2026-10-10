@@ -174,6 +174,33 @@ function extractRequiredArtifacts(goal) {
 // Files that are legitimately empty (so existence, not content, is enough).
 const EMPTY_OK = /(?:^|\/)(?:\.gitkeep|__init__\.py|py\.typed|\.nojekyll|\.gitignore)$/i;
 
+/** v54.5: does the task explicitly demand a packaged artifact (AppImage/.deb/installer)? */
+function goalImpliesPackaging(goal) {
+    return /\b(appimage|app-image|\.?deb\b|installer|packag(?:e|ing)|electron-builder)\b/i.test(String(goal || ''));
+}
+
+/** Find packaged artifacts (*.AppImage, *.deb) under the usual output dirs. */
+function findPackagedArtifacts(projectRoot) {
+    const found = [];
+    const scan = (dir, depth) => {
+        if (depth > 3) return;
+        let ents;
+        try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+        for (const ent of ents) {
+            const abs = path.join(dir, ent.name);
+            if (ent.isDirectory()) { scan(abs, depth + 1); continue; }
+            if (!/\.(AppImage|deb)$/i.test(ent.name)) continue;
+            try {
+                const st = fs.statSync(abs);
+                // A <64 KB "package" is a truncated/failed artifact, not a deliverable.
+                if (st.isFile() && st.size > 65536) found.push({ rel: path.relative(projectRoot, abs), size: st.size });
+            } catch (e) { /* ignore */ }
+        }
+    };
+    for (const d of ['release', 'dist', 'build', 'out']) scan(path.join(projectRoot, d), 0);
+    return found;
+}
+
 /** True if a NON-EMPTY file with this basename exists (touched, or anywhere a few levels deep).
  *  A required deliverable that is 0 bytes is not "done". */
 function artifactExists(projectRoot, name, files) {
@@ -215,6 +242,17 @@ async function runValidation(projectRoot, filesTouched, goal, opts = {}) {
             if (!artifactExists(projectRoot, name, files)) {
                 messages.push(`[ARTIFACT] ${name} is required by the prompt but missing`);
             }
+        }
+    }
+
+    // --- v54.5 packaged artifacts: an AppImage/.deb task is not done until a real,
+    // non-trivial artifact exists under release/|dist/|build/|out/. This kills the
+    // "packaging timed out but I'll claim it built" class of false completion. ---
+    if (goalImpliesPackaging(goal)) {
+        ranChecks++;
+        const packaged = findPackagedArtifacts(projectRoot);
+        if (!packaged.length) {
+            messages.push('[PACKAGE] the task asks for a packaged artifact (.AppImage/.deb) but none exists yet under release/, dist/, build/ or out/ — run the packaging command (electron-builder / npm run dist; use is_background:true and poll read_process_log for long builds) and verify the file with ls -lh before declaring done');
         }
     }
 
@@ -602,5 +640,7 @@ module.exports = {
     findProjectIndexHtml,
     formatGateMessage,
     formatBeforeDoneMessage,
-    goalImpliesBuildWork
+    goalImpliesBuildWork,
+    goalImpliesPackaging,
+    findPackagedArtifacts
 };

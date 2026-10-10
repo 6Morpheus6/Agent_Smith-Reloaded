@@ -47,6 +47,10 @@ const INVOKE_CHANNELS = [
     'imagegen-status', 'imagegen-set-enabled', 'imagegen-update-settings',
     'imagegen-list-models', 'imagegen-import-model', 'imagegen-pick-file',
     'imagegen-import-url', 'imagegen-select-model', 'imagegen-remove-model', 'imagegen-generate',
+    // v55.3: Electron Depot auto-provisioning (detect + download missing build assets).
+    'electron-assets-status', 'electron-assets-retry',
+    // v55.5: Piper TTS — SPEAK RESPONSES engine (status probe + speak request).
+    'tts-status', 'tts-speak',
     'ghosttrace-append'
 ];
 
@@ -57,7 +61,9 @@ const SEND_CHANNELS = [];
 const RECEIVE_CHANNELS = [
     'whatsapp-qr', 'whatsapp-ready', 'whatsapp-error', 'whatsapp-disconnected',
     'resource-update', 'plugin-ui-event',
-    'code-event', 'preview-event', 'imagegen-event'
+    'code-event', 'preview-event', 'imagegen-event',
+    // v55.3: Electron Depot auto-provisioning progress (detect/download/verify).
+    'electron-assets-event'
 ];
 
 const api = { INVOKE_CHANNELS, SEND_CHANNELS, RECEIVE_CHANNELS };

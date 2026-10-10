@@ -39,6 +39,15 @@ const WRITE_FIRST_TOOLS = new Set(['write_file', 'append_file', 'patch', 'mark_c
 const WRITE_OR_HOST = new Set(WRITE_FIRST_TOOLS);
 for (const n of HOST_TOOLS) WRITE_OR_HOST.add(n);
 
+// v54.7 — run_command joins the write-first turn. "Build X AND package it" tasks need shell
+// from turn one: environment checks (node/npm versions, architecture), scaffolding, and the
+// packaging command itself. Without it, an empty-workspace build could only explore with
+// host tools or stall — the model then stops with an empty reply and loops on generic
+// "COMPLETION BLOCKED" nudges (the v54.7 circling report). Read/search/preview stay
+// withheld: there is still nothing in the folder to read, so the original purpose of the
+// write-first filter is preserved — only the one execution tool joins.
+WRITE_OR_HOST.add('run_command');
+
 function initialPhase() {
     return 'explore';
 }

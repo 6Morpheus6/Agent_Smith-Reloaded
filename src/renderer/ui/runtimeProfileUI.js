@@ -1,8 +1,28 @@
 /**
  * Runtime profile UI — auto-tune existing TUNING sliders on model change.
+ *
+ * v55.9.1 — MIN-CTX AUTO-RELOAD: the 10s refresh loop (and every send) re-reads what LM
+ * Studio ACTUALLY has loaded for the selected model; if that verified window is below the
+ * app-wide minimum (ctxGate.minCtx, 32000), auto-tune reloads THAT model in LM Studio at
+ * the floor automatically — instead of letting the send gate wall the user off with
+ * "Minimum context not met" and telling them to fix it by hand.
  */
 (function (global) {
     'use strict';
+
+    // v55.9.1: the app-wide minimum ctx lives in ctxGate (shared, env-overridable). The
+    // renderer has no `process` global (nodeIntegration:false), so load it through a guarded
+    // require — esbuild bundles it into dist/renderer/bundle.js; in Node tests it resolves
+    // from disk. If both fail (shouldn't happen) fall back to ctxGate's own default.
+    let _minCtxFn = null;
+    try { _minCtxFn = require('../shared/ctxGate.js').minCtx; } catch (e) { /* bundled build */ }
+    function minCtxFloor() {
+        try {
+            const n = typeof _minCtxFn === 'function' ? _minCtxFn() : NaN;
+            if (Number.isFinite(n) && n > 0) return Math.floor(n);
+        } catch (e) { /* fall through */ }
+        return 32000; // ctxGate.DEFAULT_MIN_CTX — keep in sync
+    }
 
     const LS_AUTO = 'agentsmith_auto_tune';
     const LS_OVERRIDE = 'agentsmith_profile_override';
@@ -34,13 +54,18 @@
     let _chipEl = null;
     let _toggleEl = null;
     let _modelSelect = null;
+    // v55.9.2 — explicit APPLY button next to the ctx slider (manual-ctx-field). The user sets
+    // ANY context value and presses it to reload LM Studio at exactly that window; while a
+    // manual apply is in flight, reflection must not fight the button over the slider.
+    let _applyBtn = null;
+    let _applyingCtx = false;
     let _lastProfile = null;
     let _applying = false;
     let _invoke = null;
     let _getApiBaseUrl = null;
     let _isBusy = null;
-    let _debounceMs = 350;
-    let _ctxTimer = null;
+    // v55.9.2: the ctx slider's debounced auto-sync is gone (the APPLY button owns it), so the
+    // _debounceMs/_ctxTimer bookkeeping went with it.
     let _pendingSync = null;
     let _syncing = false;
     // v51.5 — last VERIFIED loaded context for the selected model (from LM Studio's own state,
@@ -54,6 +79,17 @@
     // of a 20GB+ model seconds after the first one finished.
     let _swapHandledCtx = null;
     let _swapHandledAt = 0;
+    // v55.9.1 — min-ctx auto-reload bookkeeping:
+    //   _minReloadInFlight — a below-min reload is running (the 10s loop must not stack another).
+    //   _minReloadModel — the model that in-flight reload targets (for status messaging).
+    //   _lastMinReloadFail — { model, at } of the last FAILED below-min reload; while set we
+    //     back off for 60s so an unfixable state (hardware can't hold 32K) doesn't churn a
+    //     multi-GB unload/load every refresh tick. A successful reload clears it.
+    let _minReloadInFlight = false;
+    let _minReloadModel = null;
+    let _lastMinReloadFail = null;
+    // v55.9.1 — the in-flight auto-reload operation (promise), so awaitMinCtxReload can join it.
+    let _minReloadOp = null;
 
     function isAutoTuneEnabled() {
         return localStorage.getItem(LS_AUTO) !== 'false';
@@ -102,6 +138,10 @@
      * never shows a computed default that disagrees with reality. The chip stays owned by the
      * auto-tune profile / sync status — reflection only moves the slider + caches the verified
      * value for the min-ctx gate; unmanaged/remote endpoints clear the cache (nothing to verify).
+     *
+     * v55.9.1 — MIN-CTX AUTO-RELOAD: when the VERIFIED loaded window is below the app-wide
+     * minimum, auto-tune reloads that model in LM Studio at the floor automatically (see
+     * ensureMinCtx) instead of waiting for the send gate to wall the user off.
      */
     async function refreshLoadedContext(modelId) {
         if (!modelId || !_els?.ctxSlider) return null;
@@ -113,14 +153,120 @@
         } catch (e) { /* status is advisory — fall through to the computed profile */ }
         _loadedCtx = Number(result?.managed === true ? result.loadedContext : NaN);
         if (!Number.isFinite(_loadedCtx)) _loadedCtx = null;
-        if (_loadedCtx > 0 && String(_els.ctxSlider.value) !== String(_loadedCtx)) {
+        // v55.9.2: while a MANUAL APPLY is in flight, the button owns the slider — reflection
+        // must not repaint it with the pre-reload window mid-operation (the reload takes
+        // seconds on multi-GB models and the 10s loop would otherwise fight the button).
+        if (_loadedCtx > 0 && !_applyingCtx && String(_els.ctxSlider.value) !== String(_loadedCtx)) {
             // The loaded window is ground truth for the slider — override whatever was set.
             _applying = true;
             _els.ctxSlider.value = String(Math.min(_loadedCtx, Number(_els.ctxSlider.max) || _loadedCtx));
             if (_els.ctxVal) _els.ctxVal.textContent = String(_loadedCtx);
             _applying = false;
         }
+        // v55.9.1: verified-but-too-small → fix it in LM Studio now, for the user.
+        if (_loadedCtx > 0 && _loadedCtx < minCtxFloor()) {
+            ensureMinCtx(modelId);
+        }
         return _loadedCtx;
+    }
+
+    /**
+     * v55.9.1 — MIN-CTX AUTO-RELOAD: the selected model is VERIFIED loaded below the app-wide
+     * minimum (32000). Reload it in LM Studio at exactly that floor, for the user:
+     *   - only when auto-tune is ON and no manual override is active (a deliberate slider pick
+     *     is respected — same contract as every other auto-tune action);
+     *   - never while a run is busy or another reload/sync is in flight (the 10s refresh loop
+     *     re-checks on its next tick, so nothing is lost by waiting);
+     *   - with a 60s back-off after a FAILED attempt, so hardware that genuinely cannot hold
+     *     the floor doesn't churn a multi-GB unload/load every ten seconds.
+     * Returns the in-flight operation promise (or null when it did not start one), so the send
+     * gate can await the fix instead of walling the user off mid-reload.
+     */
+    function ensureMinCtx(modelId) {
+        const min = minCtxFloor();
+        if (!modelId || !isAutoTuneEnabled() || hasOverride()) return null;
+        if (_minReloadInFlight || _syncing || busyNow()) return null;
+        if (_lastMinReloadFail && _lastMinReloadFail.model === modelId
+            && Date.now() - _lastMinReloadFail.at < 60000) {
+            setChipStatus(`ctx ${_loadedCtx} below min ${min} — retry in a moment`, 'Auto-reload failed; backing off before trying again.');
+            return null;
+        }
+        const invoke = apiInvoke();
+        if (typeof invoke !== 'function') return null;
+        _minReloadInFlight = true;
+        _minReloadModel = modelId;
+        setChipStatus(`ctx ${_loadedCtx} below min — reloading LM Studio at ${min}...`, '');
+        const op = (async () => {
+            try {
+                const result = await invoke('lmstudio-ensure-model', { apiBaseUrl: currentApiBase(), model: modelId, contextLength: min });
+                if (result?.managed === false) {
+                    // Unreachable / unmanaged — nothing to reload against. Back off so the loop
+                    // doesn't hammer a dead endpoint every tick; the send gate stays permissive
+                    // for unverifiable endpoints anyway.
+                    _lastMinReloadFail = { model: modelId, at: Date.now() };
+                    setChipStatus(syncLabel(result), result.warning || result.error || '');
+                    return result;
+                }
+                const loaded = Number(result?.loadedContext);
+                if (Number.isFinite(loaded) && loaded >= min) {
+                    _lastMinReloadFail = null; // success — clear any back-off
+                    applyLoadedContext(result);
+                    setChipStatus(syncLabel(result), result?.warning || '');
+                } else {
+                    // LM Studio could not reach the floor (VRAM). Report honestly and back off.
+                    _lastMinReloadFail = { model: modelId, at: Date.now() };
+                    applyLoadedContext(result);
+                    setChipStatus(`ctx ${loaded || '?'} — below min ${min}, retry in a moment`, result?.warning || 'LM Studio could not load the minimum context.');
+                }
+                return result;
+            } catch (e) {
+                _lastMinReloadFail = { model: modelId, at: Date.now() };
+                setChipStatus('ctx auto-reload failed', e.message || String(e));
+                return { managed: false, error: e.message || String(e) };
+            } finally {
+                _minReloadInFlight = false;
+                _minReloadModel = null;
+            }
+        })();
+        const tracked = op.finally(() => { if (_minReloadOp === tracked) _minReloadOp = null; });
+        _minReloadOp = tracked;
+        return tracked;
+    }
+
+    /**
+     * v55.9.1 — send gate: a below-min auto-reload for THIS model is in flight (refreshLoadedContext
+     * just kicked it off). Await it (bounded) and re-verify, so the user's message goes out against
+     * the fixed window instead of being walled off while the fix runs. Returns true when the model
+     * now verifies at/above the floor; false otherwise (gate falls back to its normal messaging).
+     */
+    async function awaitMinCtxReload(modelId, timeoutMs = 240000) {
+        if (!modelId || !_minReloadOp || _minReloadModel !== modelId) return false;
+        const op = _minReloadOp;
+        try {
+            // The timer is unref'd so a slow/never-finishing reload can't pin Node's event loop
+            // (unit tests mount this UI and must exit).
+            await Promise.race([op, new Promise(r => {
+                const to = setTimeout(() => r(false), timeoutMs);
+                if (to.unref) to.unref();
+            })]);
+        } catch (e) { /* the operation never rejects — it reports via its result */ }
+        try {
+            const v = await refreshLoadedContext(modelId);
+            return typeof v === 'number' && Number.isFinite(v) && v >= minCtxFloor();
+        } catch (e) { return false; }
+    }
+
+    /**
+     * v55.9.1 — status for the send gate (sendMessage): is a below-min auto-reload running or
+     * in back-off for THIS model? Lets the gate say "auto-fixing, retry in a moment" instead
+     * of the old manual "unload and reload it yourself" wall.
+     */
+    function getMinCtxReloadState(modelId) {
+        const min = minCtxFloor();
+        if (_minReloadInFlight && _minReloadModel === modelId) return { state: 'in_flight', min };
+        if (_lastMinReloadFail && _lastMinReloadFail.model === modelId
+            && Date.now() - _lastMinReloadFail.at < 60000) return { state: 'backoff', min };
+        return { state: null, min };
     }
 
     /** Verified loaded context for the current selection, or null when unverified. */
@@ -195,6 +341,61 @@
         }
     }
 
+    /**
+     * v55.9.2 — MANUAL CTX APPLY: the user set a context value on the slider and pressed APPLY.
+     * Reload LM Studio at EXACTLY that window (any value is accepted, including well above the
+     * 32000 minimum) and mirror what actually loaded back onto the slider + chip. This is the
+     * explicit counterpart to auto-tune's sync: it works whether Auto-tune is on or off, never
+     * queues behind a busy run (the user asked for it NOW — the main-process manager serializes
+     * against in-flight operations), and reports VRAM fallbacks honestly instead of snapping
+     * the slider back to whatever was loaded before.
+     */
+    async function applyCtx(modelId, contextLength) {
+        const model = String(modelId || _modelSelect?.value || '');
+        let requested = parseInt(contextLength ?? _els?.ctxSlider?.value, 10);
+        if (!model || !Number.isFinite(requested)) return null;
+        requested = Math.max(2048, Math.min(Number(_els?.ctxSlider?.max) || 262144, requested));
+        const invoke = apiInvoke();
+        if (typeof invoke !== 'function') return null;
+        _applyingCtx = true;
+        setApplyBtnBusy(true);
+        // A manual apply is a deliberate user action — it wins over auto-tune's profile.
+        setOverride(true);
+        setChipStatus(`Reloading LM Studio ctx ${requested}...`, '');
+        try {
+            const result = await invoke('lmstudio-ensure-model', { apiBaseUrl: currentApiBase(), model, contextLength: requested });
+            if (result?.managed === false) {
+                // Unreachable / unmanaged endpoint — nothing to reload against. The slider keeps
+                // the user's value; the chip says why it could not be applied.
+                setChipStatus(syncLabel(result), result.warning || result.error || 'LM Studio unmanaged');
+                return result;
+            }
+            const loaded = Number(result?.loadedContext);
+            if (Number.isFinite(loaded) && loaded > 0) {
+                _applying = true; // keep the 10s reflection loop from fighting us mid-write
+                _els.ctxSlider.value = String(Math.min(loaded, Number(_els.ctxSlider.max) || loaded));
+                if (_els.ctxVal) _els.ctxVal.textContent = String(loaded);
+                _applying = false;
+            }
+            setChipStatus(syncLabel(result), result?.warning || '');
+            return result;
+        } catch (e) {
+            setChipStatus('LM Studio ctx apply failed', e.message || String(e));
+            return { managed: false, error: e.message || String(e) };
+        } finally {
+            _applyingCtx = false;
+            setApplyBtnBusy(false);
+        }
+    }
+
+    function setApplyBtnBusy(busy) {
+        if (!_applyBtn) return;
+        try {
+            _applyBtn.disabled = !!busy;
+            _applyBtn.textContent = busy ? 'APPLYING…' : 'APPLY';
+        } catch (e) { /* element may be gone */ }
+    }
+
     async function flushPendingContextSync() {
         if (!_pendingSync || busyNow() || _syncing) return null;
         const pending = _pendingSync;
@@ -227,6 +428,9 @@
         // ground truth — mirror it over the computed profile, then sync to that value. While a
         // run is busy, syncContextForModel queues itself and reports "queued" on the chip.
         await refreshLoadedContext(modelId);
+        // v55.9.1: refresh may have just kicked off a below-min AUTO-RELOAD for this model —
+        // it owns the load now; syncing on top of it would double-invoke lmstudio-ensure-model.
+        if (_minReloadInFlight) return profile;
         const sliderValue = _els.ctxSlider ? parseInt(_els.ctxSlider.value, 10) : profile.numCtx;
         // v52.5: a model swap (lmstudio-swap-model) JUST loaded this selection at exactly the
         // context we asked for — skip the redundant re-sync or LM Studio reloads a multi-GB
@@ -235,6 +439,15 @@
         if (_swapHandledCtx === modelId && Date.now() - _swapHandledAt < 60000) {
             _swapHandledCtx = null;
             setChipStatus(syncLabel({ managed: true, loadedContext: sliderValue || profile.numCtx }), '');
+            return profile;
+        }
+        // v55.9.1: a below-min auto-reload for THIS model just failed and is in its 60s
+        // back-off — don't stack another doomed full reload on top of it (the refresh loop
+        // retries after the back-off). Manual slider changes are unaffected (they set an
+        // override, which skips this whole path).
+        if (_lastMinReloadFail && _lastMinReloadFail.model === modelId
+            && Date.now() - _lastMinReloadFail.at < 60000) {
+            setChipStatus(`ctx ${_loadedCtx ?? '?'} below min — retry in a moment`, 'Auto-reload failed; backing off before trying again.');
             return profile;
         }
         await syncContextForModel(modelId, sliderValue || profile.numCtx);
@@ -281,10 +494,11 @@
         _els = opts.sliders || {};
         _chipEl = opts.chipEl;
         _toggleEl = opts.toggleEl;
+        // v55.9.2 — explicit APPLY button next to the ctx slider (see applyCtx).
+        _applyBtn = opts.applyBtn || null;
         _invoke = opts.invoke || opts.api?.invoke || null;
         _getApiBaseUrl = opts.getApiBaseUrl || null;
         _isBusy = opts.isBusy || null;
-        _debounceMs = Number.isFinite(opts.debounceMs) ? opts.debounceMs : _debounceMs;
 
         if (_toggleEl) {
             _toggleEl.checked = isAutoTuneEnabled();
@@ -311,14 +525,11 @@
             s.addEventListener('input', () => {
                 if (_applying) return;
                 setOverride(true);
-                if (s === _els.ctxSlider) {
-                    if (_ctxTimer) clearTimeout(_ctxTimer);
-                    _ctxTimer = setTimeout(() => {
-                        _ctxTimer = null;
-                        syncContextForModel(_modelSelect?.value, _els.ctxSlider?.value);
-                    }, _debounceMs);
-                    if (_ctxTimer.unref) _ctxTimer.unref(); // don't pin Node's event loop in tests
-                }
+                // v55.9.2 — the ctx slider no longer auto-syncs on every drag: an explicit APPLY
+                // button (applyCtx, wired in app.js) is now the only thing that reloads LM Studio
+                // from this field. Dragging just marks a manual override + updates the display;
+                // pressing APPLY commits it. (The old debounced auto-sync made every slider tick
+                // queue a full model reload — and its result was what "snapped" the value back.)
             });
         });
 
@@ -350,11 +561,17 @@
         applyProfileToSliders,
         syncContextForModel,
         flushPendingContextSync,
+        // v55.9.2 — explicit APPLY button next to the ctx slider (manual ctx reload).
+        applyCtx,
         refreshLoadedContext,
         refreshCurrentLoadedContext,
         markSwapHandled,
         getVerifiedLoadedCtx,
         stopCtxRefreshLoop,
+        // v55.9.1 — min-ctx auto-reload (below-min loaded ctx → LM Studio reload at the floor)
+        ensureMinCtx,
+        awaitMinCtxReload,
+        getMinCtxReloadState,
         getMaxTurns,
         getCodeTemperature,
         getLastProfile

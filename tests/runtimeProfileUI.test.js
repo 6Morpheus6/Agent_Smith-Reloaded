@@ -108,7 +108,7 @@ test('auto-tune immediately synchronizes the profile context with LM Studio', as
     assert.match(els.chipEl.textContent, /64K|65536/);
 });
 
-test('manual context changes are debounced and only apply the final value', async () => {
+test('v55.9.2 — dragging the ctx slider no longer auto-syncs (APPLY button owns the reload)', async () => {
     const contexts = [];
     const ui = loadUi(async (channel, opts) => {
         if (channel === 'lmstudio-ensure-model') {
@@ -128,6 +128,7 @@ test('manual context changes are debounced and only apply the final value', asyn
         debounceMs: 5
     });
 
+    // Dragging the slider (any number of ticks) must NOT queue a full model reload…
     els.ctxSlider.value = '32768';
     els.ctxSlider.dispatch('input');
     els.ctxSlider.value = '49152';
@@ -135,8 +136,87 @@ test('manual context changes are debounced and only apply the final value', asyn
     els.ctxSlider.value = '65536';
     els.ctxSlider.dispatch('input');
     await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(contexts, [], 'slider drags alone never reload LM Studio');
 
+    // …pressing APPLY commits exactly the value on the slider.
+    const result = await ui.applyCtx('google/gemma-4-e4b', els.ctxSlider.value);
     assert.deepEqual(contexts, [65536]);
+    assert.equal(result.loadedContext, 65536);
+});
+
+test('v55.9.2 — APPLY accepts a context ABOVE the 32000 minimum and mirrors what loaded', async () => {
+    const contexts = [];
+    const ui = loadUi(async (channel, opts) => {
+        if (channel === 'lmstudio-ensure-model') {
+            contexts.push(opts.contextLength);
+            // LM Studio honors the request — 131072 loads fine.
+            return { managed: true, requestedContext: opts.contextLength, loadedContext: opts.contextLength, maxContext: 262144 };
+        }
+        return null;
+    });
+    const els = elements();
+    ui.mount({
+        modelSelect: els.modelSelect,
+        sliders: els,
+        chipEl: els.chipEl,
+        toggleEl: els.toggleEl,
+        getApiBaseUrl: () => 'http://localhost:1234',
+        isBusy: () => false
+    });
+
+    const result = await ui.applyCtx('google/gemma-4-e4b', 131072);
+    assert.deepEqual(contexts, [131072], 'the exact requested window was sent to LM Studio');
+    assert.equal(result.loadedContext, 131072);
+    // The slider + display now mirror the REAL loaded window (no snap-back to 32000).
+    assert.equal(els.ctxSlider.value, '131072');
+    assert.equal(els.ctxVal.textContent, '131072');
+});
+
+test('v55.9.2 — APPLY reports a VRAM fallback honestly instead of snapping the slider back', async () => {
+    const ui = loadUi(async (channel, opts) => {
+        if (channel === 'lmstudio-ensure-model') {
+            return { managed: true, requestedContext: opts.contextLength, loadedContext: 49152, maxContext: 262144, fallbackUsed: true, warning: `Requested context ${opts.contextLength} could not load; using 49152.` };
+        }
+        return null;
+    });
+    const els = elements();
+    ui.mount({
+        modelSelect: els.modelSelect,
+        sliders: els,
+        chipEl: els.chipEl,
+        toggleEl: els.toggleEl,
+        getApiBaseUrl: () => 'http://localhost:1234',
+        isBusy: () => false
+    });
+
+    const result = await ui.applyCtx('google/gemma-4-e4b', 98304);
+    assert.equal(result.fallbackUsed, true);
+    // The slider shows what ACTUALLY loaded (49152), and the chip says why.
+    assert.equal(els.ctxSlider.value, '49152');
+    assert.match(els.chipEl.textContent, /fallback|49152/i);
+});
+
+test('v55.9.2 — APPLY on an unmanaged endpoint keeps the user value and reports why', async () => {
+    const ui = loadUi(async (channel) => {
+        if (channel === 'lmstudio-ensure-model') return { managed: false, reason: 'remote_endpoint' };
+        return null;
+    });
+    const els = elements();
+    ui.mount({
+        modelSelect: els.modelSelect,
+        sliders: els,
+        chipEl: els.chipEl,
+        toggleEl: els.toggleEl,
+        getApiBaseUrl: () => 'http://localhost:1234',
+        isBusy: () => false
+    });
+
+    // The user drags the slider to 65536, then presses APPLY on an unmanaged endpoint.
+    els.ctxSlider.value = '65536';
+    const result = await ui.applyCtx('google/gemma-4-e4b', els.ctxSlider.value);
+    assert.equal(result.managed, false);
+    // Nothing to reload against — the slider keeps the user's value.
+    assert.equal(els.ctxSlider.value, '65536');
 });
 
 test('fallback updates the slider to the context LM Studio actually loaded', async () => {

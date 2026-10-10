@@ -33,7 +33,7 @@
             <div class="as-brand">
                 <span id="resource-status-dot" class="status-dot" title="Resource Status: Healthy"></span>
                 <h1 class="as-wordmark" data-text="AGENT SMITH RELOADED">AGENT SMITH RELOADED</h1>
-                <span id="app-version" class="as-version">v54.3.0</span>
+                <span id="app-version" class="as-version">v56.0.0</span>
             </div>
             <div class="as-subline">
                 <span class="as-tag">SYSTEM&nbsp;AGENT&nbsp;·&nbsp;LOCAL</span>
@@ -87,6 +87,7 @@
             <div class="chip-row" aria-label="Quick toggles">
                 <button type="button" class="mode-chip" data-toggle="memory-toggle" title="Cross-session persistent memory">◈ MEM <span id="memory-count-badge" class="memory-count-badge">[0]</span></button>
                 <button type="button" class="mode-chip" data-toggle="image-gen-toggle" title="Image generation — when on, ask Smith to make an image and he renders it locally (Vulkan GPU)">🎨 IMG</button>
+                <button type="button" class="mode-chip" data-toggle="thinking-toggle" title="Model thinking / reasoning. ON = the model may think before answering (LM Studio's setting applies). OFF = Agent Smith FORCES thinking off on every request (chat + Code Mode), regardless of what LM Studio's toggle says — that UI setting does not reliably reach API requests.">🧠 THINK</button>
             </div>
 
             <!-- Hardware Guard — always-visible compact telemetry + emergency reset.
@@ -112,6 +113,9 @@
             <input type="checkbox" id="memory-toggle" checked>
             <!-- v51.7: image generation (stable-diffusion.cpp / Vulkan). Driven by the 🎨 IMG chip. -->
             <input type="checkbox" id="image-gen-toggle">
+            <!-- v54.4: 🧠 THINK — model reasoning on/off. Checked (default) = leave thinking to
+                 LM Studio / the family harness. Unchecked = force thinking off per request. -->
+            <input type="checkbox" id="thinking-toggle" checked>
         </div>
 
         <!-- Collapsible settings. Fold state persists per data-section. -->
@@ -198,6 +202,25 @@
                 </div>
             </section>
 
+            <!-- v55.3: Electron Depot auto-provisioning. The app no longer bundles vendor/ in the
+                 package; on first launch it detects missing build assets and downloads them. This
+                 section shows live progress while a transfer runs (auto-expands) and an honest
+                 final state with RETRY after failures. Driven by src/renderer/ui/electronAssetsPanel.js. -->
+            <section class="xk-section xk-subsection collapsed" data-section="buildassets">
+                <header class="xk-section-header"><span class="xk-section-title">BUILD ASSETS</span><span class="xk-chevron">▾</span></header>
+                <div class="xk-section-body">
+                    <div id="electron-assets-status-line" class="chip-note">Checking…</div>
+                    <p class="chip-note" style="margin-top:0.3rem;">Code Mode packaging (AppImage/.deb) needs Electron runtimes + builder toolsets (~576 MB). They're downloaded once on first launch and cached for offline builds — not bundled in the app.</p>
+                    <div id="electron-assets-progress-wrap" style="display:none;margin-top:0.5rem;">
+                        <div id="electron-assets-progress-name" class="chip-note"></div>
+                        <div class="hw-bar" style="margin-top:4px;"><span id="electron-assets-progress-fill" class="hw-bar-fill" style="width:0%;"></span></div>
+                    </div>
+                    <div class="sb-row" style="margin-top:0.5rem;">
+                        <button id="electron-assets-retry-btn" class="test-btn btn-ghost" style="display:none;">RETRY DOWNLOAD</button>
+                    </div>
+                </div>
+            </section>
+
             <section class="xk-section xk-subsection collapsed" data-section="codeops">
                 <header class="xk-section-header"><span class="xk-section-title">CODE</span><span class="xk-chevron">▾</span></header>
                 <div class="xk-section-body">
@@ -207,6 +230,11 @@
                         <div class="param-group" id="manual-ctx-field">
                             <div class="param-row"><label for="ctx-slider">Context Window</label><span class="param-val" id="ctx-val">8192</span></div>
                             <input type="range" id="ctx-slider" min="2048" max="262144" step="1024" value="8192">
+                            <!-- v55.9.2: explicit APPLY — set ANY context (incl. above 32K) and press it to
+                                 reload LM Studio at exactly that window; the slider then mirrors what loaded. -->
+                            <div class="sb-row" style="margin-top:0.4rem;">
+                                <button id="ctx-apply-btn" class="test-btn btn-ghost" title="Reload LM Studio with this exact context window">APPLY</button>
+                            </div>
                         </div>
                         <div id="code-status-bar" class="chip-note">Code Mode idle</div>
                         <div id="code-readiness-chip" class="chip-note" style="display:none;"></div>
@@ -241,8 +269,14 @@
 
                     <div class="sb-divider"></div>
                     <div class="toggle-list">
-                        <div class="toggle-row"><label class="toggle-label"><input type="checkbox" id="local-tts-toggle"> SPEAK RESPONSES</label><button id="test-audio-btn" class="test-btn" title="Test speech output">TEST</button></div>
+                        <div class="toggle-row"><label class="toggle-label" title="v55.6: Piper TTS (bundled en_US-joe-medium voice) — reads each model response aloud via the main process"><input type="checkbox" id="local-tts-toggle"> SPEAK RESPONSES</label><button id="test-audio-btn" class="test-btn" title="Test speech output">TEST</button></div>
                         <div class="toggle-row"><label class="toggle-label" title="Allow show_preview screenshot of screen/window (requires source picker)"><input type="checkbox" id="preview-desktop-toggle"> DESKTOP PREVIEW</label></div>
+                        <!-- v54.4: strict mode also sends reasoning_effort:'none' (LM Studio's own
+                             request-level control). OFF by default: models WITHOUT a reasoning
+                             control error on that field; chat_template_kwargs alone covers the
+                             thinking-by-default families (Qwen3+). Turn ON for LM Studio builds
+                             whose template ignores enable_thinking. -->
+                        <div class="toggle-row"><label class="toggle-label" title="Also send reasoning_effort:'none' when 🧠 THINK is off — LM Studio's native request-level kill switch. Some models without a reasoning control reject it with an error; leave off unless needed."><input type="checkbox" id="strict-no-think-toggle"> STRICT NO-THINK (reasoning_effort=none)</label></div>
                     </div>
 
                     <div class="sb-divider"></div>

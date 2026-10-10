@@ -5,8 +5,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const gate = require('../src/shared/ctxGate.js');
 
-test('min ctx defaults to 64000 and is env-overridable', () => {
-    assert.equal(gate.minCtx(), 64000);
+test('min ctx defaults to 32000 and is env-overridable', () => {
+    assert.equal(gate.minCtx(), 32000);
     process.env.XK_MIN_CTX = '96000';
     try { assert.equal(gate.minCtx(), 96000); } finally { delete process.env.XK_MIN_CTX; }
 });
@@ -14,20 +14,20 @@ test('min ctx defaults to 64000 and is env-overridable', () => {
 test('verified window at/above the minimum passes', () => {
     assert.deepEqual(
         gate.checkCtxGate({ managed: true, model: 'm', loadedContext: 262144 }),
-        { ok: true, verified: true, loadedContext: 262144, minCtx: 64000 }
+        { ok: true, verified: true, loadedContext: 262144, minCtx: 32000 }
     );
 });
 
 test('verified window below the minimum blocks with an actionable message naming the model and the fix', () => {
-    const v = gate.checkCtxGate({ managed: true, model: 'tiny-model', loadedContext: 32768 });
+    const v = gate.checkCtxGate({ managed: true, model: 'tiny-model', loadedContext: 16384 });
     assert.equal(v.ok, false);
     assert.match(v.message, /tiny-model/);
-    assert.match(v.message, /32768/);
-    assert.match(v.message, /64000/);
+    assert.match(v.message, /16384/);
+    assert.match(v.message, /32000/);
 });
 
-test('boundary: exactly 64000 passes (minimum is inclusive)', () => {
-    assert.equal(gate.checkCtxGate({ managed: true, model: 'm', loadedContext: 64000 }).ok, true);
+test('boundary: exactly 32000 passes (minimum is inclusive)', () => {
+    assert.equal(gate.checkCtxGate({ managed: true, model: 'm', loadedContext: 32000 }).ok, true);
 });
 
 test('unmanaged / unreachable endpoints are NOT blocked (nothing verifiable)', () => {
@@ -83,8 +83,8 @@ test('v51.6 regression: the gate works in a process-less renderer (nodeIntegrati
     assert.equal(pass.ok, true);
     assert.equal(pass.verified, true);
     assert.equal(pass.loadedContext, 262144);
-    assert.equal(pass.minCtx, 64000);
-    const block = rendererGate.checkCtxGate({ managed: true, model: 'tiny', loadedContext: 32768 });
+    assert.equal(pass.minCtx, 32000);
+    const block = rendererGate.checkCtxGate({ managed: true, model: 'tiny', loadedContext: 16384 });
     assert.equal(block.ok, false);
     assert.match(block.message, /tiny/);
 });

@@ -241,7 +241,13 @@
                         numCtx,
                         apiBaseUrl,
                         apiKey: depsRef.getApiKey?.() || null,
-                        projectRoot: root
+                        projectRoot: root,
+                        // v54.4: resumed runs honour the CURRENT 🧠 THINK state (a session
+                        // saved before this field existed resumes with thinking ON).
+                        thinkingEnabled: depsRef.getThinkingEnabled?.() !== false,
+                        strictNoThink: depsRef.getStrictNoThink?.() === true,
+                        // v55.2: SUDO OVERRIDE — current value of the override field for THIS run.
+                        sudoPassword: depsRef.getSudoPassword?.() || ''
                     });
                 } finally {
                     depsRef.setCodeRunActive?.(false);
@@ -319,7 +325,12 @@
                             model: getModel?.(),
                             numCtx: getNumCtx?.(),
                             apiBaseUrl: getApiBase?.(),
-                            apiKey: getApiKey?.() || null
+                            apiKey: getApiKey?.() || null,
+                            // v54.4: 🧠 THINK — the approved run continues with the CURRENT state.
+                            thinkingEnabled: depsRef.getThinkingEnabled?.() !== false,
+                            strictNoThink: depsRef.getStrictNoThink?.() === true,
+                            // v55.2: SUDO OVERRIDE — current value of the override field for THIS run.
+                            sudoPassword: depsRef.getSudoPassword?.() || ''
                         });
                         if (res?.error) addMessage('system', `**Plan approval failed:** ${res.error}`);
                     } finally {
@@ -562,7 +573,13 @@
                         isolatedRun: deps.getIsolatedRun?.() === true,
                         parallelMilestones: deps.getParallelMilestones?.() === true,
                         milestoneWorktrees: deps.getMilestoneWorktrees?.() === true,
-                        milestoneConcurrent: deps.getMilestoneConcurrent?.() === true
+                        milestoneConcurrent: deps.getMilestoneConcurrent?.() === true,
+                        // v54.4: 🧠 THINK — per-run thinking state; the main process threads it
+                        // into every streamCompletion call of this run (planning + turns).
+                        thinkingEnabled: deps.getThinkingEnabled?.() !== false,
+                        strictNoThink: deps.getStrictNoThink?.() === true,
+                        // v55.2: SUDO OVERRIDE — current value of the override field for THIS run.
+                        sudoPassword: deps.getSudoPassword?.() || ''
                     });
                 } finally {
                     if (window.XKScrollFollow && window.XKScrollFollow.get()) {

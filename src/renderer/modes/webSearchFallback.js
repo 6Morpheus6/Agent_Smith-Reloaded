@@ -153,7 +153,10 @@
                 lines.push(`${i + 1}. ${titleHtml}${e.snippet ? ` — ${e.snippet}` : ''}`);
             }
         });
-        lines.push('', '*Compiled from the search results above — the model spent its reply on internal reasoning and never wrote its own summary, so these are the findings verbatim.*');
+        // v55.8: NO apology footer ("Compiled from … verbatim"). That line told the user the
+        // answer was a forced regurgitation of raw findings — it made the fallback read as an
+        // apology, not an answer. The report above IS Smith's synthesis (first person, sources
+        // named inline); present it as such, full stop.
         return { markdown: lines.join('\n'), entries };
     }
 

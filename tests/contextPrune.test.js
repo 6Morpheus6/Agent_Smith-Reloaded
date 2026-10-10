@@ -3,7 +3,8 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { pruneChatHistory } = require('../src/shared/contextPrune.js');
+const prune = require('../src/shared/contextPrune.js');
+const { pruneChatHistory } = prune;
 
 const big = (n) => 'x'.repeat(n);
 
@@ -119,6 +120,69 @@ test('keepRecentTurns:0 disables conversation compaction (tool capping still app
 test('short histories (below the window) are left completely untouched', () => {
     const h = [{ role: 'system', content: 's' }, { role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi' }];
     assert.deepEqual(pruneChatHistory(h), h);
+});
+
+// ── v55.8: deep-research reports are the model's answer material — never crushed mid-run ──
+
+function deepReport(chars) {
+    // The exact shape buildResearchReport emits (header + one read-in-full source).
+    return 'DEEP RESEARCH REPORT — "q"\nSources found: 1 · pages read in full: 1\n' +
+        '\nSOURCE 1: Example Title\nURL: https://example.com/page\nWHAT I LEARNED FROM THIS PAGE:\n' +
+        'finding text. '.repeat(chars);
+}
+
+test('v55.8: a deep-research report in the recent window passes through VERBATIM (no size cap)', () => {
+    const report = deepReport(4000); // ~64k chars — far beyond MAX_TOOL_CHARS (1600)
+    assert.ok(report.length > 20000, 'fixture must be a genuinely large report');
+    const h = [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'research this' },
+        { role: 'assistant', content: '', tool_calls: [{}] },
+        { role: 'tool', name: 'web_search', content: report }
+    ];
+    const out = pruneChatHistory(h);
+    assert.equal(out[3].content, report, 'report must survive pruning byte-for-byte');
+    assert.ok(!/…\[truncated/.test(out[3].content), 'no truncation marker on the report');
+});
+
+test('v55.8: a deep-research report pushed OUT of the recent window still stubs (context stays bounded)', () => {
+    const h = [{ role: 'system', content: 'sys' }];
+    // 6 tool results; keepRecentTool default is 4 → the first two (incl. our big report) stub.
+    for (let i = 0; i < 5; i++) {
+        h.push({ role: 'assistant', content: '', tool_calls: [{}] });
+        h.push({ role: 'tool', name: 't' + i, content: i === 0 ? deepReport(300) : 'small result ' + i });
+    }
+    const out = pruneChatHistory(h);
+    assert.equal(out[2].content, '[earlier tool output omitted to conserve context]', 'old report stubbed');
+});
+
+test('v55.8: a prior-session deep-research report is still stubbed (closed history)', () => {
+    const h = [
+        { role: 'system', content: 'sys' },
+        { role: 'assistant', content: '', tool_calls: [{}] },
+        { role: 'tool', name: 'web_search', content: deepReport(300), __priorSession: true }
+    ];
+    const out = pruneChatHistory(h);
+    assert.equal(out[2].content, '[earlier tool output omitted to conserve context]');
+});
+
+test('v55.8: isDeepResearchReport detects the report header and rejects everything else', () => {
+    assert.equal(prune.isDeepResearchReport(deepReport(1)), true);
+    assert.equal(prune.isDeepResearchReport('plain tool output'), false);
+    assert.equal(prune.isDeepResearchReport(null), false);
+});
+
+test('v55.8: non-report big tool results are still capped (behavior unchanged)', () => {
+    const h = [{ role: 'system', content: 'sys' }, { role: 'tool', name: 'browser_snapshot', content: big(5000) }];
+    const out = pruneChatHistory(h);
+    assert.ok(out[1].content.length < 2000, 'regular tool result still capped');
+});
+
+test('v55.8: report exemption is idempotent — re-pruning a verbatim report changes nothing', () => {
+    const h = [{ role: 'system', content: 'sys' }, { role: 'tool', name: 'web_search', content: deepReport(300) }];
+    const once = pruneChatHistory(h);
+    const twice = pruneChatHistory(once);
+    assert.equal(twice[1].content, once[1].content);
 });
 
 // ── v53.4: fresh-start stale-task fixation — restored turns are CLOSED history ──

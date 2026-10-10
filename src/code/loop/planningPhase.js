@@ -62,7 +62,10 @@ async function runPlanningPhase(ctx) {
             model,
             messages: bodyMessages,
             tools,
-            signal
+            signal,
+            // v54.4: 🧠 THINK — planning turns honour the run's thinking state too.
+            thinkingEnabled: ctx.thinkingEnabled,
+            strictNoThink: ctx.strictNoThink
         });
 
         const msg = result.message;

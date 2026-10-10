@@ -216,7 +216,16 @@ function createLmStudioManager(deps = {}) {
             before.maxContext,
             Math.max(4096, Math.floor(Number(contextLength) || 4096))
         );
-        if (before.loadedContext === requestedContext && before.parallel === 1) {
+        // v55.9.2 — RESPECT A LARGER LOADED WINDOW: the user's own LM Studio context setting is
+        // ground truth (ctxGate REFLECTION). When the model is ALREADY loaded with a window at or
+        // above what was requested, that window satisfies the request — accept it and do NOT
+        // reload. The old code treated any mismatch as "wrong" and force-reloaded DOWN to the
+        // requested value: auto-tune's 32000 floor (or a stale slider) silently downgraded a
+        // model the user had loaded at, say, 65K/131K back to 32K — which is exactly why "change
+        // ctx above 32000" always showed up as 32000 in Agent Smith. A smaller-than-requested
+        // window still reloads (the v55.9.1 min-ctx auto-reload path), and a larger request than
+        // what's loaded still grows the window — only "already at or above" is now a no-op.
+        if (before.loadedContext != null && before.loadedContext >= requestedContext) {
             return {
                 ...before,
                 requestedContext,

@@ -13,6 +13,7 @@ const { tryParseJson } = require('../tools/jsonRepair.js');
 const { stripInlineReasoning } = require('./reasoningStrip.js');
 const { buildToolResponseFormat, parseConstrainedContent } = require('./constrainTools.js');
 const { classifyHttpError } = require('../../shared/streamSignals.js');
+const thinkingToggle = require('../../shared/thinkingToggle.js'); // v54.4: 🧠 THINK wire overrides
 
 function apiBase(base) {
     return normalizeLlmBaseUrl(base);
@@ -78,7 +79,12 @@ async function streamCompletion({
     // (content, reasoning or tool_call). Model-agnostic: it fires from what arrives on the
     // wire, so every family reports its busy state identically. The UI uses this to show a
     // live "model is generating" indicator and to refuse actions that would cut the reply off.
-    onState = null
+    onState = null,
+    // v54.4: 🧠 THINK — per-run thinking state threaded from the renderer toggle.
+    // undefined/true = leave thinking to LM Studio + family harness (pre-v54.4 behaviour);
+    // false = force thinking off in this request body. strict adds reasoning_effort:'none'.
+    thinkingEnabled = true,
+    strictNoThink = false
 }) {
     const url = `${apiBase(apiBaseUrl)}/v1/chat/completions`;
     // v52.7: UNBOUNDED output (max_tokens:-1). LM Studio honors -1 as "no cap" — verified
@@ -116,6 +122,11 @@ async function streamCompletion({
     // thinking off so the budget reaches content/tool calls). The family wins over our
     // defaults; providers that don't know the key simply ignore it.
     Object.assign(body, bodyOverridesFor(model));
+    // v54.4: 🧠 THINK toggle — when the run was started with thinking disabled, force it
+    // off on the wire regardless of LM Studio's per-model UI setting (which does not apply
+    // to API requests on every build). Merged AFTER the family overrides so an explicit
+    // user OFF always wins. No-op (zero new fields) when thinkingEnabled !== false.
+    Object.assign(body, thinkingToggle.thinkingBodyOverrides(thinkingEnabled, { strict: strictNoThink }));
     // Constrained tool-call decoding (opt-in): instead of native function-calling, send the
     // tools as an LM Studio json_schema response_format so the model can only emit a valid
     // {name, arguments} object. The reply arrives as JSON content, parsed below.

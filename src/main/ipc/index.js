@@ -21,6 +21,7 @@ const registerPreviewIpc = require('./preview.js');
 const registerLmStudioIpc = require('./lmStudio.js');
 const registerActionsIpc = require('./actions.js');
 const registerImageGenIpc = require('./imageGen.js');
+const registerElectronAssetsIpc = require('./electronAssets.js');
 
 module.exports = function registerAllIpc(ipcMain, deps) {
     // Register each domain in isolation: a failure in one (e.g. a domain that touches an
@@ -41,6 +42,7 @@ module.exports = function registerAllIpc(ipcMain, deps) {
         ['lmStudio', registerLmStudioIpc],
         ['actions', registerActionsIpc],
         ['imageGen', registerImageGenIpc],
+        ['electronAssets', registerElectronAssetsIpc],
     ];
     for (const [name, register] of domains) {
         try {

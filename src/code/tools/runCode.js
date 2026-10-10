@@ -193,10 +193,26 @@ function createRunCodeExecutor(deps) {
                     if (WRITE_TOOLS.has(name)) {
                         session.agentRanOkAfterEdit = false;
                         session.testRunsSinceEdit = false;
+                        session._readsSinceLastEdit = 0; // v54.6 gather-before-change
                         if (rel && !session.filesTouched.includes(rel)) session.filesTouched.push(rel);
-                    } else if (name === 'run_command' && !subArgs.is_background) {
+                    } else if (name === 'read_file' || name === 'grep' || name === 'glob') {
+                        // v54.6: reads inside a program count as gathering too.
+                        session._readsSinceLastEdit = Number(session._readsSinceLastEdit || 0) + 1;
+                    } else if (name === 'run_command') {
+                        // v54.6: background jobs started from a program join the settle ledger.
+                        const rOut = outcome.result || {};
+                        const jid = rOut.jobId ?? rOut.job_id;
+                        if (subArgs.is_background && jid !== undefined && jid !== null) {
+                            if (!session._bgJobIds) session._bgJobIds = new Set();
+                            session._bgJobIds.add(String(jid));
+                        }
+                    }
+                    if (name === 'run_command' && !subArgs.is_background) {
+                        // v54.6: use the SHARED verification policy (was an inline regex that had
+                        // drifted from longBuildPolicy — build/package commands didn't count here).
+                        const { isVerificationCommand } = require('../../shared/longBuildPolicy.js');
                         const cmd = String(subArgs.command || '');
-                        const isVerification = /(test|lint|check|compile|tsc|py_compile|mypy|eslint|jest|vitest|pytest|npm run test|npm run lint)/.test(cmd);
+                        const isVerification = isVerificationCommand(cmd);
                         if (!r.error && isVerification) session.testRunsSinceEdit = true;
                         if (!r.error) session.agentRanOkAfterEdit = true;
                     }

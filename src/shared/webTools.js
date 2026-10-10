@@ -8,6 +8,20 @@
  * actually says + its key facts, and assembles a detailed natural-language report of
  * everything learned. That report is what both tool paths return by default; the old
  * snippet-only behavior survives behind {deep:false} / quick:true for fast lookups.
+ *
+ * v54.9 — DETAIL PASS: the report was too terse to answer from (3 pages × 6k chars,
+ * 4 sentences + 5 facts per page, 900-char findings cap → brief final answers). Now it
+ * reads EVERY top result in full (all 6 of them) at up to 18k readable chars each and
+ * carries a 12-sentence findings paragraph + up to 10 facts per page into the report
+ * (3600/400-char caps), so Smith has enough material from ALL sources for a genuinely
+ * detailed answer.
+ *
+ * v55 — TRIPLE BUDGET: answers were still coming back capped short (~200 words). The whole
+ * deep-research char budget is tripled end to end: 54k readable chars per page, up to 36
+ * findings sentences + 30 facts per page, and the report carries them at 10800/1200-char
+ * caps (≈ 100k chars of source-grounded material worst case). The nudge demands a matching
+ * ≥1500-word synthesis. Nothing else about the pipeline changed — same sources, same format,
+ * same fallbacks.
  */
 'use strict';
 
@@ -16,16 +30,27 @@ const { validatePublicFetchTarget } = require('./netGuard.js');
 const MAX_RESULTS = 6;
 const SEARCH_TIMEOUT_MS = 15000;
 const FETCH_TIMEOUT_MS = 20000;
-const FETCH_MAX_CHARS = 8000;
+const FETCH_MAX_CHARS = 12000;
 
-// ── v54 deep-research tuning ──────────────────────────────────────────────────
-const RESEARCH_PAGE_COUNT = 3;           // top pages read in full (default)
-const RESEARCH_FETCH_TIMEOUT_MS = 15000; // per-page fetch bound
-const RESEARCH_PAGE_CHARS = 6000;        // readable text kept per page
-const RESEARCH_TOTAL_BUDGET_MS = 45000;  // wall-clock budget for ALL page reads (they run in parallel)
-const RESEARCH_MIN_CONTENT_CHARS = 80;   // below this a body is "thin" → snippet-only source
-const RESEARCH_SUMMARY_SENTENCES = 4;    // sentences in each page's "what I learned" paragraph
-const RESEARCH_FACTS_MAX = 5;            // key facts per page
+// ── v54 deep-research tuning (v55: tripled budget) ────────────────────────────
+// v54.9 read every top result and carried 12 sentences + 10 facts per page into the report;
+// answers still came back capped short (~200 words). v55 TRIPLES the entire char budget end
+// to end: each page is read at up to 54k readable chars, its findings paragraph grows to 36
+// sentences and its fact list to 30 entries, and the report caps carrying them are tripled
+// (10800-char findings / 1200-char facts). Worst case ≈ 6 × (~10.8k + 30×1.2k) ≈ 100k chars
+// of source-grounded material — the report is what Smith answers FROM, so its size IS the
+// answer's ceiling. Timeouts are tripled too (parallel reads need wall-clock room for 54k × 6).
+const RESEARCH_PAGE_COUNT = MAX_RESULTS;   // read ALL top results in full (default)
+const RESEARCH_FETCH_TIMEOUT_MS = 75000;   // per-page fetch bound
+const RESEARCH_PAGE_CHARS = 74000;         // readable text kept per page ("fully read")
+const RESEARCH_TOTAL_BUDGET_MS = 270000;   // wall-clock budget for ALL page reads (they run in parallel)
+const RESEARCH_MIN_CONTENT_CHARS = 80;     // below this a body is "thin" → snippet-only source
+const RESEARCH_SUMMARY_SENTENCES = 36;     // sentences in each page's "what I learned" paragraph
+const RESEARCH_FACTS_MAX = 30;             // key facts per page
+// Report caps (context budget): the report must stay bounded, but with enough room that a
+// detailed answer is possible. ~6 pages × (~10800-char findings + 30×1200-char facts) ≈ 100k chars.
+const RESEARCH_REPORT_SUMMARY_CAP = 10800; // per-page "WHAT I LEARNED" paragraph cap (chars)
+const RESEARCH_REPORT_FACT_CAP = 1200;     // per-fact line cap (chars)
 
 function cleanText(str) {
     return String(str || '')
@@ -287,10 +312,10 @@ function buildResearchReport(query, results, pages) {
         const src = results[p.index];
         if (!src) continue;
         lines.push('', `SOURCE ${p.index + 1}: ${src.title}`, `URL: ${src.url}`);
-        if (p.summary) lines.push('WHAT I LEARNED FROM THIS PAGE:', capText(p.summary, 900));
+        if (p.summary) lines.push('WHAT I LEARNED FROM THIS PAGE:', capText(p.summary, RESEARCH_REPORT_SUMMARY_CAP));
         if (Array.isArray(p.keyFacts) && p.keyFacts.length) {
             lines.push('KEY FACTS:');
-            for (const f of p.keyFacts) lines.push(`- ${capText(f, 260)}`);
+            for (const f of p.keyFacts) lines.push(`- ${capText(f, RESEARCH_REPORT_FACT_CAP)}`);
         }
     }
 
@@ -307,7 +332,7 @@ function buildResearchReport(query, results, pages) {
         lines.push('', '(None of the top pages could be read in full — this report is built from search snippets alone.)');
     }
 
-    lines.push('', '[SYSTEM NUDGE] This result is a DEEP RESEARCH REPORT: it contains what was actually learned from the source pages, not just snippets. Your next response MUST be a detailed, complete report for the user written in natural language (Smith\'s voice, first person): synthesize EVERYTHING above into flowing prose organized by topic — include specific facts, numbers, names and dates, and name your sources inline (title + URL). Do NOT reply with a bare list of snippets or "here are some results". If a page could not be read, say so honestly. The pages above were already fetched for you — do NOT call fetch_url on them again; if you need more depth from OTHER sources, one or two targeted fetch_url calls are fine.');
+    lines.push('', '[SYSTEM NUDGE] This result is a DEEP RESEARCH REPORT: it contains what was actually learned from EVERY source page above (all of them were read in full), not just snippets. Your next response MUST be a LONG, detailed, complete report for the user written in natural language (Smith\'s voice, first person): synthesize EVERYTHING above into flowing prose organized by topic — include specific facts, numbers, names and dates, and name your sources inline (title + URL). Do NOT reply with a bare list of snippets or "here are some results". The report above is deliberately detailed — match it: write at least 1500 words, cover EVERY source listed above (each one was read in full), weave the different sources together where they agree or disagree, and do not compress the findings into one or two sentences. If a page could not be read, say so honestly. The pages above were already fetched for you — do NOT call fetch_url on them again; if you need more depth from OTHER sources, one or two targeted fetch_url calls are fine.');
     return lines.join('\n');
 }
 
@@ -366,5 +391,6 @@ module.exports = {
     webSearch, fetchUrl, researchWeb, cleanText, htmlToReadable,
     // v54 deep-research internals (exported for unit tests)
     buildResearchReport, splitSentences, pickKeyFacts, summarizePage, queryTerms, scoreSentence, isTitleEcho,
-    RESEARCH_PAGE_COUNT, RESEARCH_TOTAL_BUDGET_MS
+    RESEARCH_PAGE_COUNT, RESEARCH_TOTAL_BUDGET_MS, RESEARCH_PAGE_CHARS, RESEARCH_SUMMARY_SENTENCES, RESEARCH_FACTS_MAX,
+    RESEARCH_REPORT_SUMMARY_CAP, RESEARCH_REPORT_FACT_CAP
 };

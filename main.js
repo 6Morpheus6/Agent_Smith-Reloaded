@@ -208,6 +208,11 @@ const registerWhatsAppIpc = require('./src/main/lifecycle/whatsapp.js');
 try { registerWhatsAppIpc(ipcMain, getMainWindowRef, app, pushEvent); }
 catch (e) { console.error('[startup] WhatsApp IPC registration skipped:', (e && e.message) || e); }
 
+// v55.5: Piper TTS — the SPEAK RESPONSES toggle's real engine (main process).
+const registerTtsIpc = require('./src/main/lifecycle/tts.js');
+try { registerTtsIpc(ipcMain, {}); }
+catch (e) { console.error('[startup] TTS IPC registration skipped:', (e && e.message) || e); }
+
 // IPC domains (open-file-dialog, auth, history, agent, edit, project, plan,
 // ledger, git, memory, plugins) are registered from src/main/ipc/* near the
 // bottom of this file via registerAllIpc(ipcMain, ipcDeps). OS/lifecycle
@@ -348,6 +353,15 @@ function createWindow() {
 
 app.whenReady().then(() => {
     createWindow();
+
+    // v54.8 — warm the Electron Depot: seed <userData>/electron-cache from vendor/ so a
+    // packaging build can start immediately. Non-blocking; failure only means old behavior.
+    try { electronDepot && electronDepot.ensureReady(); } catch (_) {}
+
+    // v55.3 — auto-provision missing Electron Depot assets (vendor/ is no longer bundled).
+    // Delayed 2 s so the window exists and can receive progress events; non-blocking, and a
+    // failure only means build tools fall back to fetching from GitHub on demand.
+    setTimeout(() => { try { electronAssets && electronAssets.ensureInstalled(); } catch (_) {} }, 2000);
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -672,11 +686,21 @@ const browserVerify = safeInit('browserVerify', () => createBrowserVerify({ proj
 const actionLog = safeInit('actionLog', () => createActionLog({ userDataPath }));
 const downloadRegistry = safeInit('downloadRegistry', () => createDownloadRegistry({ userDataPath }));
 const lmStudioManager = safeInit('lmStudioManager', () => createLmStudioManager());
+// v54.8 — Electron Depot: pre-provisioned Electron runtimes + builder toolsets so Code Mode
+// packaging builds (npm install / electron-builder) never pull ~120 MB from GitHub.
+const { createElectronDepot } = require('./src/main/services/electronDepot.js');
+const electronDepot = safeInit('electronDepot', () => createElectronDepot({ userDataPath, getAppPath: () => app.getAppPath() }));
 const imageGenManager = safeInit('imageGenManager', () => createImageGenManager({
     userDataPath,
     pushEvent,
     registerDownload: (p) => { try { downloadRegistry && downloadRegistry.register(p); } catch (_) {} }
 }));
+// v55.3 — Electron Depot auto-provisioning: vendor/ is no longer bundled in the package, so on
+// first launch detect which build assets are missing from the local cache and download them
+// (with live progress events). Non-blocking; a failure degrades to the old behavior where the
+// build tools fetch what they need from GitHub on demand.
+const { createElectronAssets } = require('./src/main/services/electronAssets.js');
+const electronAssets = safeInit('electronAssets', () => createElectronAssets({ userDataPath, pushEvent }));
 registerAllIpc(ipcMain, {
     // electron + node
     dialog, fs, fsPromises, path, spawn, exec,
@@ -698,7 +722,9 @@ registerAllIpc(ipcMain, {
     actionLog,
     downloadRegistry,
     lmStudioManager,
+    electronDepot,
     imageGenManager,
+    electronAssets,
     isElectronDesktop: true,
     setAllowDesktopPreview: (enabled) => { previewDesktopAllowed = !!enabled; },
 });

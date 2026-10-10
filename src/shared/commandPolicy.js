@@ -10,10 +10,36 @@
  *      root (the same boundary the file tools enforce).
  * In-project dev commands (npm/node/python/git/ls/cat/mkdir/test runners, deletes inside the
  * project, redirects into project files) are allowed so the agent stays autonomous.
+ *
+ * SUDO: `sudo` is NOT on the denylist. When the user fills in the SUDO OVERRIDE field,
+ * that IS explicit authorization to run with elevated privileges — the harness injects
+ * the password (stdin via `echo '<pass>' | sudo -S`, never an interactive prompt) and
+ * the policy must not veto it. A command that BEGINS with sudo (or the injected
+ * `echo … | sudo` prefix) is therefore judged by layer 1 ONLY: layers 2/3 exist to keep
+ * an UNPRIVILEGED autonomous agent inside its sandbox, but with explicit root
+ * authorization system paths and files are the legitimate target (`sudo apt upgrade`,
+ * `sudo dpkg -i /tmp/x.deb`, editing `/etc` or home dotfiles as root). Layer 1 still
+ * applies to elevated commands — no override request implies unrecoverable machine
+ * destruction (`sudo rm -rf /`, `sudo mkfs …`, `sudo dd of=/dev/sda`) or piping remote
+ * downloads into an interpreter. A sudo that appears MID-command (not leading) does not
+ * earn the exemption: the whole command is still screened by layers 2/3, so a non-elevated
+ * secret read can't piggyback on an authorized elevated tail. Without a password supplied,
+ * sudo commands run as-is and simply fail at the prompt — the policy never blocks on
+ * "no password" alone; only the layers above do.
  */
 'use strict';
 
 const path = require('path');
+// v55.2 fix: injectSudoPassword lives in the browser-safe sudoInject.js (no node
+// builtins) so the renderer can require it without dragging `require('path')` into
+// the esbuild bundle — that external was throwing "require is not defined" at load
+// time and blanking the whole sidebar. Re-exported here to keep the main-process API stable.
+const { injectSudoPassword } = require('./sudoInject.js');
+
+// A command that BEGINS with `sudo` (optionally after an already-injected
+// `echo '<pass>' | sudo -S` prefix) — i.e. an elevated command authorized by the user's
+// SUDO OVERRIDE field.
+const SUDO_LEADING = /^(?:echo\s+(?:"[^"]*"|'[^']*')\s*\|\s*)?sudo\b/;
 
 // Layer 1 — catastrophic / host-level. Matched case-insensitively against the normalized command.
 const RULES = [
@@ -32,7 +58,6 @@ const RULES = [
     { re: /\b(?:curl|wget|iwr|invoke-webrequest)\b[^|\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|dash|powershell|pwsh|python\d?|node|ruby|perl)\b/i, reason: 'piping a remote download straight into an interpreter' },
     { re: /\b(?:iex|invoke-expression)\b[^\n]*(?:downloadstring|webclient|invoke-webrequest|iwr|curl|wget)/i, reason: 'IEX of a remote download (PowerShell)' },
     { re: /\b(?:shutdown|reboot|poweroff|halt|init\s+0|init\s+6)\b/i, reason: 'host power-state change' },
-    { re: /\bsudo\b/i, reason: 'privilege escalation (sudo) is not permitted in autonomous mode' },
 ];
 
 // Layer 2 — home dotfiles, credentials, and system secrets (a coding task in a project has no
@@ -89,9 +114,18 @@ function assessCommand(command, opts = {}) {
     const cmd = String(command || '').replace(/\s+/g, ' ').trim();
     if (!cmd) return { allowed: true };
 
+    // Layer 1 — catastrophic / host-level. Applies to EVERY command, including elevated ones:
+    // an explicit sudo override authorizes root privileges, not unrecoverable machine damage.
     for (const rule of RULES) {
         if (rule.re.test(cmd)) return { allowed: false, reason: rule.reason };
     }
+
+    // v55.2 — a command that BEGINS with sudo is explicitly authorized by the user's SUDO
+    // OVERRIDE field; layers 2/3 (home/system secrets + project-root containment) exist to
+    // sandbox an UNPRIVILEGED autonomous agent and must not veto it. System paths are the
+    // legitimate target of elevated commands (`sudo apt upgrade`, `sudo dpkg -i /tmp/x.deb`).
+    if (SUDO_LEADING.test(cmd)) return { allowed: true };
+
     if (HOME_SECRET.test(cmd) || SYS_SECRET.test(cmd)) {
         return { allowed: false, reason: 'accesses home dotfiles / credentials / system secrets outside the project' };
     }
@@ -114,11 +148,12 @@ function assessCommand(command, opts = {}) {
 function blockedResult(command, reason) {
     return {
         error: `Command blocked by safety policy (${reason}). It will not run. ` +
-            'Operate inside the project root only: delete/redirect to paths within the project, do not touch home/credentials/system files, and do not escalate privileges. ' +
-            'If you genuinely need this, ask the user to run it manually.',
+            'Operate inside the project root only: delete/redirect to paths within the project, do not touch home/credentials/system files. ' +
+            'Commands that begin with sudo are permitted (the user authorizes them via the SUDO OVERRIDE field) but must not be catastrophic — no rm -rf of / or ~, no mkfs/dd onto raw disks, no piping remote downloads into an interpreter. ' +
+            'If you genuinely need something else, ask the user to run it manually.',
         commandBlocked: true,
         reason
     };
 }
 
-module.exports = { assessCommand, blockedResult, escapesRoot, RULES };
+module.exports = { assessCommand, blockedResult, escapesRoot, injectSudoPassword, RULES };

@@ -1,5 +1,811 @@
 # Agent Smith Changelog
 
+## [56.0.0] - 2026-10-09 — 🔄 Updatable AppImage (zsync) + .deb for v56
+
+User request: "other users have been asking me to make the appimage updateable and i dont know how
+to do that" — a user explained it needs `appimagetool -u "<gh-releases-zsync URL>"` so an
+`.AppImage.zsync` delta file is produced alongside, both uploaded to GitHub Releases.
+
+What "updatable AppImage" actually means: the AppImage runtime can check a *zsync* (rsync-style
+delta) endpoint and download only the changed blocks of a newer release instead of re-fetching the
+whole ~270MB image. That requires TWO things, both now done:
+1. An **UPDATEINFO header string** baked into the AppImage telling it where to look.
+2. A matching **`.AppImage.zsync`** file uploaded next to each release (the delta manifest).
+
+### Why a new script was needed
+electron-builder 26.x does NOT write that UPDATEINFO header — it only emits an electron-updater
+`.blockmap`, which this app doesn't consume. So the classic AppImage update channel had to be added
+with raw `appimagetool -u` (the exact command from the user's explanation).
+
+### What changed
+- **`scripts/build-updatable-appimage.sh`** — new, reproducible build step. Assembles an AppDir from
+  electron-builder's `release/linux-unpacked/` + `vendor/appdir-chrome/` (AppRun/.desktop/icons/usr
+  libs), then runs:
+  ```
+  appimagetool -u "gh-releases-zsync|6Morpheus6|Agent_Smith-Reloaded|latest|Agent.Smith.Reloaded-*.AppImage.zsync" \
+      AppDir Agent.Smith.Reloaded-<ver>.AppImage
+  ```
+  One command produces BOTH the updatable `.AppImage` (header embedded) and its `.zsync`. It then
+  verifies: header round-trips via `--appimage-updateinfo`, zsync `Length` == actual file size, and
+  removes electron-builder's non-updatable duplicate.
+- **`vendor/appimagetool-x86_64.AppImage`** — vendored appimagetool (continuous build) so the build is
+  self-contained; it bundles its own `zsyncmake`, so no system install / sudo needed.
+- **`vendor/appdir-chrome/`** — AppRun, `.desktop`, icon set + desktop-integration libs captured from
+  a known-good electron-builder AppDir (version-independent chrome).
+- **Version bump 55.9.2 → 56.0.0** in `package.json`; `index.html` / README badge auto-synced by the
+  existing `build-renderer.js`.
+
+### How to ship it (each release)
+```bash
+npm run dist && bash scripts/build-updatable-appimage.sh   # or: npm run dist:updatable
+```
+Upload ALL THREE to the GitHub Release (tag `v<ver>`):
+- `release/Agent.Smith.Reloaded-<ver>.AppImage`
+- `release/Agent.Smith.Reloaded-<ver>.AppImage.zsync`   ← must be uploaded too, or updates break
+- `release/agent-smith_<ver>_amd64.deb`
+
+### Verified
+- Header: `--appimage-updateinfo` returns the exact gh-releases-zsync URL.
+- zsync SHA-1 matches `sha1sum` of the AppImage; `Length` field == file size.
+- New AppImage launches (AMD Strix Halo detected, web UI on :3000) — not just packaged.
+- `.deb` metadata: Package agent-smith, Version 56.0.0, amd64.
+- Unit tests: 1068/1079 pass — identical to the v55.9.2 baseline (same 11 pre-existing failures).
+
+## [55.9.2] - 2026-10-08 — 🎛️ Explicit context control: APPLY button + no more 32K snap-back
+
+User request: "if i try to change ctx to a number higher than 32000 it still shows in agent smith
+as 32000. anything over 32000k ctx should be accepted when detected" — plus an explicit APPLY
+button next to the slider that reloads LM Studio at exactly what the user set.
+
+Root cause — reproduced against the real modules: `ensureNow()` in
+`src/main/services/lmStudioManager.js` treated ANY loaded window different from the requested one
+as "wrong". The fast path only matched on exact equality (`loadedContext === requestedContext &&
+parallel === 1`). So when LM Studio had a model loaded at, say, 65K/131K and Agent Smith asked for
+its 32000 floor (auto-tune) or a stale slider value, the manager UNLOADED the model and reloaded it
+DOWN to 32000 — then REFLECTION mirrored that 32000 back onto the slider. Every "change ctx above
+32K" attempt ended up showing 32000 in the app, no matter what LM Studio actually had loaded.
+
+### What changed
+- **`src/main/services/lmStudioManager.js`** — `ensureNow()` now accepts a loaded window that is at
+  OR ABOVE the requested context (no reload; the larger window is reported as-is). A smaller loaded
+  window still reloads UP to the request (v55.9.1 min-ctx auto-reload preserved), and a larger
+  request than what's loaded still grows the window — only "already at or above" became a no-op.
+- **`src/renderer/ui/runtimeProfileUI.js`** — new `applyCtx(modelId, contextLength)`: the explicit
+  MANUAL CTX APPLY path. It works whether Auto-tune is on or off, sends EXACTLY the slider value to
+  `lmstudio-ensure-model`, mirrors what actually loaded back onto the slider + chip (VRAM fallbacks
+  reported honestly), and keeps the 10s reflection loop from fighting it mid-reload (`_applyingCtx`).
+  The ctx slider's old debounced auto-sync on every drag is gone — dragging only marks a manual
+  override; pressing APPLY commits it. `mount()` accepts an `applyBtn` element (busy state + label).
+- **`index.html`** — APPLY button next to the Context Window slider in the manual ctx field.
+- **`src/renderer/app.js`** — passes the button into `XKRuntimeProfileUI.mount()` and wires its
+  click to `applyCtx(modelSelect.value, ctxSlider.value)`.
+
+### Tests
+- `tests/lmStudioManager.test.js` — regression: loaded 131072 + request 32000 → NO reload, reports
+  131072; plus the two inverse directions (grow up from below, min-ctx reload) still work.
+- `tests/runtimeProfileUI.test.js` — slider drags no longer auto-sync; APPLY sends the exact value
+  above the minimum and mirrors it back; VRAM fallback + unmanaged-endpoint paths report honestly.
+
+## [55.9.1] - 2026-10-07 — 🧠 Auto-tune keeps LM Studio's loaded context honest (min-ctx auto-reload)
+
+User request: "make sure autotune is able to refresh detected ctx changes in lm studio and any
+model loaded in agent smith if detected model isnt loaded with a minimum of 32000 ctx it needs
+to be automatically reloaded in lm studio for the user at 32000 ctx."
+
+Root cause — two gaps, both reproduced against the real modules:
+
+1. **Auto-tune could target a window below its own floor.** `buildRuntimeProfile()` sized
+   `num_ctx` from VRAM tier × model size (e.g. 8K–18K on low-VRAM cards). That value drove BOTH
+   auto-tune's context sync AND the v52.5 model-swap load — so the app would happily reload LM
+   Studio at a window that is *below* the 32000-token minimum `ctxGate` enforces on every send.
+   The user then hit "Minimum context not met" and was told to fix it by hand in LM Studio.
+
+2. **A model already loaded below the floor was never fixed.** The 10s refresh loop re-read what
+   LM Studio actually has loaded (REFLECTION) but only *mirrored* that value onto the slider — if
+   the user had loaded a model at, say, 8K in LM Studio, auto-tune dutifully reflected 8K and did
+   nothing. The send gate then blocked every message with "unload it and reload it with a context
+   length of 32000 or higher" — i.e. the app detected the problem but made the user fix it.
+
+### What changed
+- **`src/shared/runtimeProfile.js`** — `buildRuntimeProfile()` now floors `num_ctx` at
+  `ctxGate.minCtx()` (32000, env-overridable via `XK_MIN_CTX`). Applied LAST so no VRAM-tier cap
+  can push it back below the minimum. A profile may never target a window Agent Smith can't use;
+  when hardware genuinely cannot hold 32K the main-process loader's fallback ladder degrades and
+  reports it, and a warning is surfaced on the chip.
+- **`src/renderer/ui/runtimeProfileUI.js`** — MIN-CTX AUTO-RELOAD: `refreshLoadedContext()` (run by
+  the 10s loop AND every send) now detects a VERIFIED loaded window below the floor and calls the
+  new `ensureMinCtx(modelId)` to reload THAT model in LM Studio at exactly 32000. Guards: only when
+  auto-tune is ON with no manual override; never while a run is busy or another sync/reload is in
+  flight (the loop retries next tick); and a 60s back-off after a FAILED attempt so unfixable
+  hardware doesn't churn a multi-GB unload/load every ten seconds. New `awaitMinCtxReload()` lets
+  the send gate join an in-flight fix, and `getMinCtxReloadState()` reports in_flight/backoff.
+- **`src/renderer/app.js`** — the min-ctx send gate now joins any in-flight auto-reload (bounded)
+  and re-verifies before deciding to block; when it still blocks it says "auto-tune is reloading /
+  will keep retrying automatically" instead of only the old manual "fix it yourself" wall.
+
+### Tests
+`tests/minCtxAutoReload.test.js` (new, 8 tests) covers: below-min → reload at exactly 32000;
+at/above min → no reload; auto-tune OFF / override → detected but not reloaded; failed reload →
+back-off + VRAM message; success clears back-off so a later regression is fixed again; the send-gate
+join path; busy runs defer to the next tick; unmanaged/unreachable endpoints never trigger it.
+`tests/runtimeProfile.test.js` updated for the floor (env-overridable).
+
+## [55.9.0] - 2026-09-27 — 📱 Remote web UI button renders in browser (Windows) mode again
+
+User report: "the windows version is missing the icon for sharing the remote webui."
+
+Root cause — `src/renderer/app.js` hid the composer's 📱 button (`#phone-connect-btn`,
+which opens the QR modal to open/share the remote web UI on a phone) whenever the page
+loaded over http(s):
+
+```js
+if (isWebMode && phoneConnectBtn) phoneConnectBtn.style.display = 'none';
+if (phoneConnectBtn && !isWebMode) { /* wire click */ }
+```
+
+Windows users run Agent Smith Pinokio-style through a browser, where the page is served
+over http(s), so `isWebMode` was true and the button never rendered — while native
+Electron (file://) showed it fine. The "pointless in a browser" premise was wrong: in a
+desktop browser you still want to scan the QR with your real phone.
+
+### What changed
+- **`src/renderer/app.js`** — the 📱 button is now shown and wired in BOTH Electron and
+  web mode (`if (phoneConnectBtn)`). On actual phones nothing changes: at ≤768px viewports
+  `base.css` replaces the whole `.input-area` with the mobile FAB composer, so the button
+  never appears there anyway.
+
+## [55.8.0] - 2026-09-26 — Limitless deep-research budget (findings can no longer kill the run)
+
+User report: "there's an issue with the search tool where the budget burns out before
+the model is done, and then I see 'Compiled from the search results above — the model
+spent its reply on internal reasoning and never wrote its own summary, so these are the
+findings verbatim.' The model throws out what it had but it's just a regurgitation because
+it was force-nudged. If the agent needs more budget to complete its deep research then
+ensure it can by making its budget limitless."
+
+Root cause — two compounding bugs, both reproduced against the real modules:
+
+1. **The model never saw its own findings.** `web_search` (v54+) returns a DEEP RESEARCH
+   REPORT of up to ~100k chars — that report IS the answer material, and its nudge demands
+   a 1500+ word synthesis of it. But `contextPrune.pruneChatHistory()` caps EVERY recent
+   tool result at `MAX_TOOL_CHARS` (1600) before each turn: an 87k-char report reached the
+   model as a 1,663-char fragment + "…[truncated 86004 chars]". The nudge then demanded a
+   long synthesis of a stub — impossible. The thinking-by-default model burned its entire
+   per-reply output budget on reasoning (finish_reason:"length", zero content), the run fell
+   into the v53.5 silence fallback, and the user got the "Compiled from … verbatim" dump.
+
+2. **The context window was a hard cap mid-run.** When accumulated history + reports outgrew
+   LM Studio's loaded context length, the request 400'd with `exceed_context_size` and the run
+   died with "Lower the Context Window slider and retry" — i.e. the app told the user to make
+   their research budget SMALLER while mid-research.
+
+### What changed
+- **`src/shared/contextPrune.js`** — deep-research reports (detected by the stable
+  `DEEP RESEARCH REPORT` header, new exported helper `isDeepResearchReport`) are EXEMPT from
+  the size cap while they sit in the recent window: they pass through verbatim. Reports pushed
+  out of the recent window (older than `keepRecentTool`) and prior-session reports still stub
+  to `[earlier tool output omitted…]`, so context stays bounded — the exemption is about the
+  ACTIVE research, not unbounded history. All other tool results cap exactly as before.
+- **`src/renderer/app.js`** — LIMITLESS RESEARCH BUDGET: when a mid-run request fails with a
+  classified context overflow (`classifyHttpError.isContextOverflow`) and this run has not yet
+  auto-expanded, the app asks LM Studio for the model's `max_context_length`, reloads at that
+  maximum via `lmstudio-ensure-model` (the existing VRAM-safe path — it estimates first and
+  falls back to the largest loadable window), marks the swap handled (suppresses the redundant
+  10 s re-sync), and retries the SAME turn. One-shot per run (`ctxAutoExpanded`) — if it
+  overflows again at max, the history is genuinely too big and the honest error surfaces
+  instead of looping. Unmanaged/remote endpoints skip straight to the honest error.
+- **`src/renderer/modes/webSearchFallback.js`** — the "Compiled from the search results above —
+  … these are the findings verbatim" footer is GONE. The synthesized answer (first person,
+  sources named inline) is presented as Smith's report, not an apology for a forced dump.
+- **Tests** — `tests/contextPrune.test.js` (+6: verbatim recent report, out-of-window stub,
+  prior-session stub, detector, non-report cap unchanged, idempotence),
+  `tests/webSearchFallback.test.js` (footer-gone assertion), new `tests/researchBudget.test.js`
+  (pins the auto-expand wiring + one-shot flag + fall-through error).
+
+### What did NOT change
+Turns were already infinite (v52.7) — no step cap was added or removed. The v53.5 silence /
+web-only-batch fallbacks still exist as a last resort for genuinely silent models, but with the
+report intact they are now reached only when the model truly produces nothing. No new env vars
+or config keys; the expansion uses the existing `lmstudio-get-status` / `lmstudio-ensure-model`
+IPC and LM Studio's own VRAM estimation.
+
+### Verified
+Unit suite green (see 55.7 section for the runner). Reproduction check: an 87,604-char report
+pruned through `pruneChatHistory` now survives byte-for-byte (was 1,663 chars + truncation
+marker before this fix).
+
+## [55.7.0] - 2026-09-26 — No parallel web searches (one search per turn)
+
+User report: "when I asked it to do a search, because it decided to do parallel
+searches it burned through its chars budget."
+
+Root cause — the model was never told not to fan out. `web_search` is a DEEP
+RESEARCH call (v54): each one reads the top result pages in full and returns a
+long report into history, so N parallel searches = N× page-reads + N× reports in
+one turn. Worse, Code Mode's SYSTEM_PROMPT actively encouraged it: "BATCH
+INDEPENDENT WORK — emit them ALL in ONE reply: they run concurrently." Nothing
+excluded web_search from that advice, and the dsh dispatch lane happily overlaps
+whatever the model emits (web_search is exclusive-classified, so it serialized
+anyway — no speed win, only N× context cost).
+
+### What changed (prompt-level only — no new guardrail machinery)
+- **`src/renderer/modes/agentTools.js`** (chat mode):
+  - `AGENT_MODE_SYSTEM_APPENDIX` gains a "NO PARALLEL SEARCHES" section: at most
+    ONE web_search per turn; if more than one topic is needed, run them
+    SEQUENTIALLY (search → wait for its result → next search) or fold everything
+    into a single well-phrased query.
+  - `web_search` tool schema description now says "ONE search per turn: never emit
+    multiple web_search calls in one reply — each reads whole pages and burns the
+    context budget." (Small models read the schema more than the appendix.)
+- **`src/code/loop/turnLoop.js`** (code mode):
+  - SYSTEM_PROMPT "BATCH INDEPENDENT WORK" now carries an explicit exception:
+    "web_search is NEVER batched: at most ONE search per reply."
+  - New rule 20 in the numbered rules: "NO PARALLEL SEARCHES — at most ONE
+    web_search call per reply, never several in one turn (batching applies to
+    reads/greps, NOT searches) …"
+- **`package.json` / `index.html` / `README.md`** — version 55.7.0 + description/badge.
+
+### What did NOT change
+Execution paths are untouched: the chat batch executor and the code-mode dispatch
+lane still run whatever (single) search the model emits, exactly as before. No
+new env vars, config keys, or runtime guards — this is pure instruction to the
+model, per request ("everything else works correctly; the agent just needs to know").
+
+### Verified
+- `npm test` full suite: 100% pass (see build log) — no behavior tests touched.
+- `node --check` on both edited modules; renderer bundle rebuilt via
+  `scripts/build-renderer.js`; "NO PARALLEL SEARCHES" confirmed present in the
+  shipped `dist/renderer/bundle.js`.
+
+## [55.6.0] - 2026-09-26 — Default Piper TTS voice switched to en_US-joe-medium
+
+User request: "change the default tts piper voice to joe."
+
+### What changed
+- **`resources/piper/voices/`** — swapped the bundled voice: `en_US-lessac-medium.onnx(.json)` →
+  `en_US-joe-medium.onnx(.json)` (HuggingFace rhasspy/piper-voices, en/en_US/joe/medium). Same
+  Piper 2023.11.14-2 runtime, same ~60 MB model size — only the voice changed. The old lessac files
+  were removed from the bundle so the AppImage/.deb ship exactly one voice (joe).
+- **`src/main/lifecycle/tts.js`** — `VOICE_NAME`: `en_US-lessac-medium` → `en_US-joe-medium`. This is
+  the single source of truth: runtime resolution (`findRuntimeIn`) looks for `voices/<VOICE_NAME>.onnx`,
+  synthesis passes it to `piper --model`, and `tts-status` reports it — so the whole chain (status probe,
+  TEST button toast "Piper (en_US-joe-medium)", response speech) follows automatically.
+- **`index.html`** — SPEAK RESPONSES tooltip now names the joe voice; sidebar version chip → v55.6.0.
+- **`package.json`** — version 55.6.0, description updated to name the new default voice.
+
+### What did NOT change
+Everything else: the Piper engine architecture (v55.5), playback chain (paplay/aplay/afplay/SoundPlayer),
+newest-response-wins interruption, 90 s synthesis timeout, 32K min-ctx gate, Code Mode, and all other
+settings.
+
+### Verified
+- `tests/tts.test.js`: **19/19 pass** (fake piper/player binaries; the tests key off `tts.VOICE_NAME`, so
+  they exercise the joe path end-to-end).
+- Real runtime smoke test on this machine: `piper --model voices/en_US-joe-medium.onnx` → valid WAV,
+  synthesis RTF measured (see build log), no stderr.
+
+## [55.5.0] - 2026-09-24 — SPEAK RESPONSES actually speaks again (Piper TTS restored in the main process)
+
+User report: "the speak response toggle doesn't seem to work when I enable it and prompt the model, it
+doesn't actually speak."
+
+Root cause — **Electron on Linux has no Web Speech API backend.** The toggle drove `localSpeak()` →
+`window.speechSynthesis.speak(...)` in the renderer. Chromium's speech-synthesis service is not built into
+Linux Electron, so every utterance was silently dropped: TEST button silent, responses silent, zero errors
+anywhere (the "not supported" branch never fires — `speechSynthesis` exists as an object, it just has no
+voices/engine). The original desktop Piper path was deleted in v44.2 ("Browser Web Speech API TTS remains")
+and that remaining path never worked on this platform.
+
+What changed:
+- **NEW `src/main/lifecycle/tts.js`** — main-process Piper engine (the same architecture v44.2 removed,
+  rebuilt):
+  - Synthesis via the bundled `piper` binary (`--model <voice> --output_file <tmp.wav>`, text on stdin),
+    with a 90 s timeout + stderr capture for honest error messages.
+  - Playback via `paplay` (PulseAudio/PipeWire) → `aplay` (ALSA) on Linux, `afplay` on macOS, PowerShell
+    SoundPlayer on Windows. **Newest response wins** — a new request kills in-flight audio and supersedes an
+    in-flight synthesis (a slow first reply can't talk over the second).
+  - Runtime resolution: explicit `resourcesDir` → dev `<repo>/resources/piper` → packaged
+    `<process.resourcesPath>/piper`. `ESPEAK_DATA_PATH` points at the bundled espeak-ng phonemizer data so no
+    system package is required.
+- **NEW `resources/piper/`** (~130 MB, ships via electron-builder `extraResources`, outside app.asar):
+  Piper 2023.11.14-2 linux-x86_64 runtime (piper + onnxruntime 1.14.1 + espeak-ng phonemizer + data) and the
+  **en_US-lessac-medium** voice (HuggingFace rhasspy/piper-voices). Measured RTF ≈ 0.043 — a 2 s reply
+  synthesizes in ~90 ms, so speech starts almost immediately after the model finishes.
+- **`main.js`** — registers `tts-status` / `tts-speak` IPC (startup-failure-tolerant like WhatsApp).
+- **`src/shared/ipcChannels.js`** — both channels whitelisted for the preload bridge.
+- **Renderer (`src/renderer/app.js`)** — `localSpeak()` now: (1) in Electron, probes `tts-status` once and
+  speaks through `tts-speak`; (2) only falls back to Web Speech API when running as a plain web page. When no
+  engine/player exists the user gets ONE honest system message per session ("TTS unavailable — …") instead of
+  silent nothing. The TEST button exercises the exact same Piper path and confirms with a toast; the
+  SPEAK RESPONSES label carries a tooltip naming the voice.
+- **`package.json`** — `build.extraResources: resources/piper → piper`; version 55.5.0.
+
+What did NOT change: the toggle's location/behavior contract (on = speak every final response, off = silent),
+Code Mode, the v55.4 min-ctx gate, and everything else.
+
+Verified:
+- `tests/tts.test.js`: **19/19 pass** — runtime resolution layout, which/findPlayer probing, synthesize
+  success/failure-with-stderr/timeout-kill, playWav completion + interrupt, IPC status/speak/empty-text/
+  error-object/no-temp-file-leak/newest-wins-supersede (fake piper/player shell scripts; no audio device needed).
+- Real runtime smoke test on this machine: `piper --model voices/en_US-lessac-medium.onnx` → valid 22.05 kHz
+  WAV, RTF 0.043; live playback through PipeWire confirmed.
+
+## [55.4.0] - 2026-09-21 — Min-ctx gate lowered from 64K to 32K (single-setting change)
+
+User request: "lower the ctx gate down to 32000 and dont change any of the other settings."
+
+### What changed
+- `src/shared/ctxGate.js` — `DEFAULT_MIN_CTX`: **64000 → 32000**. This is the single source of truth for the send-time context gate: a model LM Studio reports as loaded with ≥ 32,000 tokens now passes; below that it still blocks with the same actionable "reload with more context" message (now naming 32000).
+- `tests/ctxGate.test.js` — assertions updated to the new default (default value, pass/boundary at exactly 32000, block case moved to 16384 which is now genuinely below the gate; the v51.6 process-less-renderer regression test asserts 32000 too).
+- Comments in `src/code/loop/contextWindow.js` + `src/renderer/app.js` updated so they no longer state the old 64K value (comments only — no behavior change).
+
+### What did NOT change (per request)
+- Code Mode's own request floor/cap (`CODE_MIN_NUM_CTX=65536`, `CODE_MAX_NUM_CTX=98304`) untouched. It clamps *within* whatever window the model actually has loaded (`clampCodeNumCtx`), so a 32K–64K model simply requests less — over-requesting (silent backend truncation) is still impossible.
+- Slider bounds (2048–262144), `XK_MIN_CTX` env override, reflection logic, unmanaged-endpoint bypass, and every other setting: untouched.
+
+### Verified
+- `tests/ctxGate.test.js`: 9/9 pass at the new value (boundary inclusive at exactly 32000; 16384 blocks with a message naming the model + fix).
+- Full unit suite vs baseline — no new failures beyond the known seccomp set.
+
+## [55.3.0] - 2026-09-21 — Electron Depot auto-provisioning (vendor/ no longer bundled; ~635 MB off the package)
+
+User request: "add auto detect for the electron tool to verify that its assets are there and if detected
+missing pull and install them on first launch. Also need a notification that informs user those assets are
+being downloaded ... i plan to remove those assets in vendor folder that are related to the electron tool so
+this app isnt taking over 2 gigs."
+
+Why — **the Electron Depot (v54.8) ships ~635 MB of pre-provisioned runtimes/toolsets INSIDE the package**
+(`vendor/electron/*.zip` ≈564 MB + `vendor/electron-builder/*` ≈71 MB), which pushed the AppImage/.deb past
+GitHub's free-tier upload limit and made every install carry 2 GB+ of assets most users never use.
+
+What changed:
+- **NEW `src/shared/electronAssetsManifest.js`** (auto-generated by
+  `scripts/gen-electron-assets-manifest.js`) — the single source of truth for WHAT to fetch: exact GitHub URL +
+  `sizeBytes` + `sha256` per asset, read from the REAL files on disk. 8 assets (~576 MB): five Electron runtime
+  zips (31.7.7 / 37.10.3 / 42.5.0 / 42.9.3 / 42.10.1 linux-x64) + three builder toolsets (appimage-12.0.1,
+  fpm@2.1.4, 7zip@1.0.0). Re-run the generator whenever vendor/ changes.
+- **NEW `src/main/services/electronAssets.js`** — the provisioner. On first launch it: (1) AUTO-DETECTS which
+  manifest assets are missing from the local cache (size check, then sha256), (2) DOWNLOADS only what's missing
+  via imageGenManager.downloadFile (redirects + .part temp files + idle watchdog), (3) VERIFIES each file's sha256
+  before trusting it (a corrupt/partial download is rejected and re-fetched, never moved into place), and (4) places
+  every file EXACTLY where @electron/get / app-builder-lib already look — a downloaded depot and the old seeded
+  (vendor) depot are indistinguishable to the build tools. Runtime zips land in `<userData>/electron-cache/<sha>/`
+  (install.js's explicit cacheRoot) with zero-disk symlink mirrors into `<userData>/electron/<sha>/` (app-builder-lib's
+  envPaths default under XDG_CACHE_HOME=<userData>) and `~/.cache/electron/<sha>/` (manual terminal builds). Toolset
+  archives land in `<userData>/electron-builder/<release>/<file>` + the @electron/get downloads fallback; app-builder-lib
+  extracts them itself on first use, so shipping archives only is sufficient.
+- **Startup trigger** (`main.js`) — `ensureInstalled()` runs ~2 s after ready (non-blocking); a failure degrades to
+  the old behavior where build tools fetch from GitHub on demand. Progress reaches the UI over the new
+  `electron-assets-event` push channel; status/retry via `electron-assets-status` / `electron-assets-retry`.
+- **NEW sidebar "BUILD ASSETS" section** (`src/renderer/ui/electronAssetsPanel.js`) — live "⬇ Downloading … X/Y MB (N%)"
+  progress bar while a transfer runs (auto-expands so first-launch users see it), an honest final state, and a RETRY
+  button after failures.
+- **`package.json`** — `build.files` no longer includes `vendor/electron/**/*` or `vendor/electron-builder/**/*`, so the
+  AppImage/.deb drops ~635 MB (≈2 GB → ≈1.4 GB). Dev mode is unaffected: `getAppPath()` still finds vendor/ on disk and
+  seeds it as before; only the packaged app triggers auto-download.
+- **SYSTEM_PROMPT rule #16** updated — "PRE-PROVISIONED" → "harness-managed depot cache, auto-downloaded on first launch";
+  a one-time "downloading electron" in build output is now documented as NORMAL (a ~120 MB fetch), not a failure.
+
+What did NOT change: the v54.8 depot env wiring (`electron_config_cache` / `XDG_CACHE_HOME` overrides on every Code Mode
+shell), seedDepot's layout, all sudo/timeout behavior from v55.2, and the fact that once assets are cached builds run fully
+offline.
+
+Tests: `tests/electronAssets.test.js` (new, 9) — manifest self-consistency, destination layout vs @electron/get +
+app-builder-lib, end-to-end ensureInstalled with a fake downloader (download→verify→place, idempotent no-op when complete,
+failure degrades without throwing, sha256-mismatch rejection), and status() for the UI catch-up path. Plus a one-shot REAL
+network test: downloaded 7zip-linux-x64.tar.gz from GitHub (exact manifest size + sha256) into both cache layouts.
+
+## [55.2.0] - 2026-09-21 — FIX: v55.2 sudo change blanked the entire sidebar (renderer bundle crash)
+
+User report: "v55.1 is the last stable working version ... all you had to do was simply make it where
+agent could sudo and whatever u did broke the whole side bar in the gui."
+
+Root cause — **the v55.2 sudo work made a RENDERER module require a MAIN-process module, dragging a
+node builtin into the browser bundle.** `src/renderer/modes/agentTools.js` (bundled by esbuild for
+`platform:'browser'`) gained a top-level `require('../../shared/commandPolicy.js')`. That module's own
+top-level `const path = require('path')` is left as an EXTERNAL by esbuild, so the rebuilt
+`dist/renderer/bundle.js` contained a static `require("path")`. The main window runs with
+`nodeIntegration:false` / `contextIsolation:true` (main.js createWindow) — a pure browser context where
+`require` does not exist — so the bundle threw "Dynamic require of 'path' is not supported" at load time,
+killing the ENTIRE renderer: no sidebar, no composer, nothing. v55.1's bundle contained zero static
+builtin requires (only one unreachable dynamic `require()`), which is why it loaded fine.
+
+What changed:
+- **NEW `src/shared/sudoInject.js`** — browser-safe home for `injectSudoPassword(command, pass)` (pure
+  string logic, no node builtins). Same function, same behavior: rewrites EVERY sudo, escapes
+  `"`, `\`, `$`, backtick, idempotent on already-injected prefixes.
+- **`src/shared/commandPolicy.js`** — `injectSudoPassword` moved out; the module now REQUIRES it from
+  sudoInject.js and re-exports it, so every main-process consumer (`src/code/tools/executor.js`) is
+  unchanged.
+- **`src/renderer/modes/agentTools.js`** — requires `../../shared/sudoInject.js` instead of
+  commandPolicy.js. The rebuilt bundle again contains no static builtin require (verified: the only
+  remaining `require(` in it is the same unreachable dynamic one v55.1 shipped).
+
+What did NOT change: any sudo-authorization behavior from the original v55.2 entry below — leading-sudo
+exemption, per-run password threading (Agent Mode + Code Mode), long-build timeouts for package-manager
+ops are all exactly as before; only WHERE the injection function lives changed.
+
+Tests: `tests/rendererBundleBrowserSafe.test.js` (new, 4) — asserts the built bundle contains no static
+require of any node builtin (the exact shipped-bug signature), that agentTools.js requires sudoInject.js
+and NOT commandPolicy.js, that sudoInject.js is builtin-free and exports a working function, and that
+commandPolicy still re-exports it. Also verified by loading the real index.html + bundle in jsdom
+(browser context, no require): old v55.2 bundle → "Dynamic require of 'path' is not supported"; fixed
+bundle → zero script errors, sidebar/composer present.
+
+## [55.2.0] - 2026-09-21 — SUDO OVERRIDE actually authorizes sudo (policy no longer blocks it)
+
+User report: "this harness has the option for user to submit sudo password and this is intended so
+agent can use sudo privileges. The problem is even if i give sudo the policy blocks agent from using
+it. For example i asked agent to update my debian system using `sudo apt update && sudo apt upgrade -y`
+and i provided my pass in the sudo override field and the policy blocked it. If sudo is provided via
+the override the agent should have full permission to use it."
+
+Root cause — **a blanket denylist rule vetoed every command containing "sudo", before or after any
+password was supplied.** `src/shared/commandPolicy.js` carried
+`{ re: /\bsudo\b/i, reason: 'privilege escalation (sudo) is not permitted in autonomous mode' }` as a
+layer-1 rule. The SUDO OVERRIDE field (`#sudo-input`, index.html) and its password-injection machinery
+already existed — `src/renderer/modes/agentTools.js` rewrote `sudo X` → `echo "<pass>" | sudo -S X` for
+Agent Mode's `run_shell_command` — but the rewritten command STILL contains "sudo", so
+`assessCommand()` (called in `src/main/ipc/agent.js` and `src/code/tools/executor.js`) vetoed it with
+"privilege escalation (sudo) is not permitted". The override could therefore never take effect. Code
+Mode had no injection at all: its `run_command` went straight to the same blanket rule.
+
+What changed:
+- **`src/shared/commandPolicy.js`** — removed the blanket `\bsudo\b` denylist rule. A command that
+  BEGINS with sudo (or an already-injected `echo '<pass>' | sudo -S` prefix) is now judged by layer 1
+  ONLY and then allowed: layers 2/3 (home/system-secret files + project-root containment) exist to keep
+  an UNPRIVILEGED autonomous agent inside its sandbox, but with explicit root authorization system paths
+  are the legitimate target (`sudo apt upgrade`, `sudo dpkg -i /tmp/x.deb`). Layer 1 still applies to
+  elevated commands — no override implies unrecoverable machine damage: `sudo rm -rf /`, `sudo mkfs …`,
+  `sudo dd of=/dev/sda`, and piping remote downloads into an interpreter are all still blocked. A sudo
+  that appears MID-command (not leading) does not earn the exemption, so a non-elevated secret read can't
+  piggyback on an authorized elevated tail (`cat ~/.ssh/id_rsa && sudo apt update` is still refused).
+- **NEW `injectSudoPassword(command, pass)`** in the same module — single source of truth for password
+  injection. Rewrites EVERY `sudo` in the command (the old Agent Mode replace missed
+  `sudo x && sudo y`), escapes `"`, `\`, `$`, backtick so a password can never break out of the echo or
+  spawn a subshell, and is idempotent on already-injected prefixes. No password / no sudo → unchanged.
+- **Agent Mode** (`src/renderer/modes/agentTools.js`) — `run_shell_command` now uses
+  `injectSudoPassword()` instead of its inline single-pass replace (same behavior for one sudo, correct
+  for many, safe escaping).
+- **Code Mode** — the override field is threaded per-run: renderer reads it at run/resume/plan-approve
+  time (`src/renderer/app.js` mount dep `getSudoPassword`, `src/renderer/modes/code.js` payloads) →
+  `code-run` / `code-resume` / `code-plan-approve` IPC (`src/main/ipc/code.js`) → in-memory
+  `activeRun.sudoPassword` (NEVER persisted to a CodeSession on disk, mirroring the apiKey pattern) →
+  `buildExecDeps()` → executor's `run_command`, which injects BEFORE the policy screen and before the
+  shell runs. Sub-dispatches from `run_code` inherit it through the same deps object.
+- **Timeouts** (`src/shared/longBuildPolicy.js`) — system package-manager operations are now recognized
+  long operations: `sudo … apt/dpkg`, `apt-get/aptitude update|upgrade|install|full-upgrade`,
+  `dpkg -i/-r/--install/--remove`, `yum/dnf update|upgrade|install`, `pacman -Syu/-S`. A full
+  `sudo apt upgrade -y` no longer dies at the default bound. Agent Mode's foreground shell
+  (`src/main/ipc/agent.js`) now resolves its timeout through `foregroundTimeoutFor()` (90 s fast-fail
+  default preserved for ordinary commands; long ops get the build-sized window) instead of a flat 90 s —
+  previously even an authorized `sudo apt upgrade` would have been SIGKILLed at 90 s in chat mode.
+
+What did NOT change: layer-1 catastrophic rules (still apply to elevated commands), layers 2/3 for
+non-elevated commands, the SUDO OVERRIDE field itself (same `#sudo-input`, same app-reset usage — that
+path already worked and is untouched), session persistence format (no new on-disk fields; the password
+lives only in memory for the duration of a run), all other tools/phases/middleware.
+
+Tests: `tests/commandPolicy.test.js` (new) covers the v55.2 contract — leading-sudo allowed, injected
+prefix form allowed, mid-command sudo still screened, elevated catastrophic/secret commands still
+blocked, `injectSudoPassword()` multi-sudo + escaping + idempotency; existing
+`securityPolicy.test.js` / `codeSecurity.test.js` expectations updated to the new contract.
+
+## [55.0.0] - 2026-09-15 — Deep Research budget tripled (answers no longer capped short)
+
+User request: "everything works how it should but i do not like the chars cap on deep research
+web tool. the reports it currently gives are correct but are always capped short so every report
+usually is provided under 200 words ... keep everything as is current but triple the budget for
+deep research."
+
+Root cause — **the v54.9 detail pass was still too small a ceiling.** The deep-research engine
+(`src/shared/webTools.js`, ONE implementation behind the chat/agent `perform-search-deep` IPC,
+Agent Mode's `web_search`, and Code Mode's `web_search`) read each page at 18k chars and carried
+only a 12-sentence findings paragraph (3600-char cap) + 10 facts (400-char cap) per page into the
+report Smith answers FROM (~34k chars worst case), and the nudge only demanded "at least 500
+words." In practice Smith kept compressing to ~200-word summaries.
+
+What changed (`src/shared/webTools.js` constants + its [SYSTEM NUDGE] — tripled end to end):
+- **Per-page read**: `RESEARCH_PAGE_CHARS` 18k → **54k** readable chars; per-page fetch bound
+  25 s → **75 s**; total parallel-read wall-clock budget 90 s → **270 s**.
+- **Per-page detail carried into the report**: findings paragraph 12 → **36** sentences, key
+  facts 10 → **30**, report caps `RESEARCH_REPORT_SUMMARY_CAP` 3600 → **10800** and
+  `RESEARCH_REPORT_FACT_CAP` 400 → **1200**. Worst case ≈ 6 × (~10.8k + 30×1.2k) ≈ **100k chars**
+  of source-grounded material (was ~34k).
+- **[SYSTEM NUDGE]** now demands "at least **1500 words**" (was 500), same coverage rules.
+- Both report caps exported for tests; `tests/webResearch.test.js` asserts the v55 contract
+  (54k page chars, 36/30 detail levels, 10800/1200 caps, ≥1500-word nudge).
+
+What did NOT change: sources read (still ALL six top results), report format (SOURCE N / WHAT I
+LEARNED / KEY FACTS / SNIPPET-ONLY contract the UI card parses), snippet-only fallbacks, quick/
+deep:false legacy path, search backend, and every other tool. `tests/webResearch.test.js` green;
+full suite judged against the known 5-failure seccomp baseline.
+
+
+## [54.9.0] - 2026-09-14 — Deep Research detail pass (ALL sources read in full; longer answers)
+
+User request: "increase the char budget for search tool deep research as the provided results
+is too short and needs to be longer to reasonably be able to give a good natural response as
+smith. All sources need to be read by smith and provide his results as he currently does but
+make sure it's not short."
+
+Root cause — **the report Smith answers FROM was capped below what a detailed answer needs.**
+`src/shared/webTools.js` (shared by the chat/agent `perform-search-deep` IPC in `main.js`,
+Agent Mode's `web_search` tool in `src/renderer/modes/agentTools.js`, and Code Mode's
+`web_search` in `src/code/tools/executor.js`) read only 3 of the top 6 results, kept just
+6000 readable chars per page, then squeezed each page down to 4 sentences + 5 facts with a
+900-char "WHAT I LEARNED" cap. The report — the ONLY material Smith has for his answer —
+landed at ~3-4k chars total, so even when he followed the nudge and wrote in his voice, the
+answer came back brief: there simply wasn't enough substance to synthesize. (Note: a partial
+detail pass — 5 pages × 18k chars — had been edited into the v54.8 folder AFTER its
+AppImage/.deb were built at 09:52, so it never shipped; this release completes and ships it.)
+
+What changed (`src/shared/webTools.js` only — one engine, all three tool paths):
+- **ALL sources are read.** `RESEARCH_PAGE_COUNT` → `MAX_RESULTS` (6): every top result is
+  fetched and read in full by default; a page that genuinely can't be read (paywall/timeout/
+  empty body) still falls back to snippet-only, so one bad source never sinks the report.
+- **Char budget per page**: 18k readable chars (`RESEARCH_PAGE_CHARS`) — a full article body —
+  with the wall-clock budget for all parallel reads raised to 90 s (`RESEARCH_TOTAL_BUDGET_MS`)
+  and the per-page fetch bound to 25 s, so six full pages actually fit.
+- **Per-page detail carried into the report**: 12-sentence "WHAT I LEARNED" paragraph (3600-char
+  cap) + up to 10 key facts (400-char cap each). Worst case ≈ 6 × ~7.6k ≈ 34k chars of real,
+  source-grounded material — the report's size IS Smith's answer ceiling, and it is no longer
+  the bottleneck.
+- **SYSTEM NUDGE strengthened**: now tells Smith every listed source was read in full and his
+  reply must be at least 500 words (was 300), cover EVERY source, and weave sources together
+  where they agree/disagree — same voice, same format, just no longer allowed to compress.
+
+Tests (`tests/webResearch.test.js`): the detail-levels test now pins `RESEARCH_PAGE_COUNT === 6`;
+new behavioral tests with stubbed fetch prove (a) ALL six top sources are read in full and each
+one's learned content reaches the report with zero snippet-only fallback, and (b) an explicit
+`pageCount: 2` still bounds reads for fast lookups. Nudge test updated to the 500-word / EVERY-
+source contract.
+
+What did NOT change: the report format (SOURCE N / WHAT I LEARNED / KEY FACTS / SNIPPET-ONLY /
+NUDGE — renderer sources card + silence-fallback parse it), `quick:true`/`deep:false` snippet-only
+mode, `fetch_url`, mode routing, LM Studio plumbing, and every Code Mode guard.
+
+## [54.8.0] - 2026-09-14 — Electron Depot (pre-provisioned Electron runtimes; no more pulling from GitHub)
+
+User request: "include electron deps to be already provided in harness so if I ask agent
+to package apps as an appimage it doesn't have to waste time pulling electron from github."
+
+Root cause — **every packaging build re-downloads ~120 MB of Electron from GitHub.** When
+Code Mode builds/packs an Electron app, two independent download paths fire:
+(1) `npm install` in the target project runs `node_modules/electron/install.js`, which calls
+`@electron/get.downloadArtifact()` and fetches `electron-vX.Y.Z-linux-x64.zip` (~120 MB) from
+GitHub releases; (2) `electron-builder` (`npm run dist`) re-fetches that SAME zip plus its own
+toolsets — appimage tools, fpm (for .deb), 7zip — via `app-builder-lib/out/util/electronGet.js`.
+Both are cached under the user's XDG cache, but a FRESH project / clean machine has nothing there,
+so each packaging task pays minutes of pure network time (and fails outright on slow/flaky links).
+
+What changed:
+- **NEW `src/main/services/electronDepot.js`** — the "Electron Depot". Ships the Electron runtime
+  zips + electron-builder toolsets INSIDE the app and, on first use, seeds them into the exact cache
+  layouts the two downloaders read (verified against the real code):
+    - `vendor/electron/linux-x64/*.zip` → `<userData>/electron-cache/<sha256(url-dir)>/electron-vX.zip`
+      (`@electron/get Cache.getCacheDirectory()` — dir = sha256 of URL with path truncated to dirname).
+    - `vendor/electron-builder/<release>/<files>` → `<userData>/electron-builder/<release>/<file>`
+      (builder archive-cache short-circuit, checked BEFORE any network) + pre-extracted dirs + `.state`
+      files verbatim + the `downloads/<sha256(url)>/` fallback.
+  Seeding is idempotent (size-checked copy-if-missing), non-blocking at startup, and degrades to old
+  behavior if `vendor/` was stripped.
+- **Pre-provisioned artifacts** — `vendor/electron/linux-x64/`: electron 31.7.7, 37.10.3, 42.5.0,
+  42.9.3, 42.10.1 (covers the user's current test apps + this app's own runtime). `vendor/electron-builder/`:
+  appimage-12.0.1, fpm@2.1.4 (.deb), 7zip@1.0.0 — archives + extracted dirs + `.state`.
+- **`src/main/ipc/code.js`** — BOTH shell paths (foreground `runForegroundCommand` and background
+  `spawnShell`) now spawn with the depot env: `electron_config_cache=<userData>/electron-cache`
+  (points `electron/install.js` at the seeded cache; it validates against the LOCAL checksums.json
+  bundled in the user's project → 100% offline) and, on Linux, `XDG_CACHE_HOME=<userData>` so
+  `@electron/get` + `app-builder-lib` resolve their default caches INTO the depot. Foreground also
+  awaits `ensureReady()` before spawning so a build never starts before its runtime is in place.
+- **`main.js`** — creates the service (`safeInit('electronDepot', …)`), warms it on `whenReady`, and
+  passes it through the IPC deps object.
+- **`package.json`** — version → 54.8.0, description updated, `vendor/electron/**/*` +
+  `vendor/electron-builder/**/*` added to electron-builder `files` so they ship in app.asar.
+- **SYSTEM_PROMPT rule #16 (`src/code/loop/turnLoop.js`)** — extended: the agent is told Electron
+  runtimes are PRE-PROVISIONED, its commands already carry depot env, and it must NOT set up mirrors /
+  pre-download manually or treat "downloading electron" as failure.
+- **NEW `tests/electronDepot.test.js`** (11 tests) — pure-helper layout assertions pinned to REAL
+  on-disk cache dir names (42.5.0 → `59ea1574…`, etc.), a real-filesystem seeding test, and an
+  integration test that loads the ACTUAL `@electron/get` ESM `Cache` class and asserts it reports a
+  HIT for the seeded zip at the exact URL it would download.
+
+What did NOT change: chat path, LM Studio plumbing, mode routing, every other Code Mode middleware /
+guard, and the v54.5 long-build timeout policy (this is orthogonal — that fixed "builds get killed",
+this fixes "builds wait on a 120 MB download"). The only remaining network touch is electron-builder's
+~KB `SHASUMS256.txt` fetch (its `@electron/get` call uses Bypass cache mode by design) — negligible vs
+a 120 MB zip, and absent entirely on the `npm install` path.
+
+## [54.7.0] - 2026-09-13 — Code Mode circling fix (run_command on write-first turns + empty-reply recovery)
+
+User report: "Code mode goes in circles with what it's doing and says it can't find
+run_command." Reproduced live against LM Studio (qwen3.8-27b abliterated) with the exact
+task class — "build a web based game of pacman and package it as an appimage" into an
+EMPTY project folder. Two failed sessions (`~/.config/Agent Smith/code-sessions/`
+code_1789304064851, code_1789235157) + their ghost traces show the full loop:
+
+Root cause 1 — **run_command was not offered on write-first turns.** A greenfield build
+starts in `implement` with `emptyWorkspace=true`, so `turnLoop.js` runs every turn until
+the first file exists under `writeOnly=true`. The router (`src/code/tools/router.js`)
+filters the implement set down to `WRITE_OR_HOST` (writes + host-control tools) — and
+`run_command` is in NEITHER. So on exactly the turns where a "build X AND package it"
+task needs shell (checking node/npm versions, architecture, existing artifacts), the tool
+does not exist in the schema: the model can only explore with `list_host_directory` /
+`review_actions` / `read_host_file`, or write a `run_code` program whose sub-call throws
+"not offered by the phase router". v53.7 added run_command to implement, but this filter
+silently nullified it on empty-workspace turns — the model then stalls, stops with an
+empty reply, and gets generic "COMPLETION BLOCKED / WRITE REQUIRED" nudges: circling.
+
+Root cause 2 — **clean-empty replies looped into the completion gate.** The 27B
+abliterated Qwen spent ~40 minutes per turn on internal reasoning (ghost trace: single
+`inference.generate` of 2,421,844 ms) and then emitted an EMPTY reply with
+finish_reason `stop`. That classifies as "clean" in `streamSignals.classifyStreamEnd`, so
+the v52.7 exhaustion recovery (which only catches finish_reason `length`) never fired —
+the empty stop went straight to the completion gate, which pushed a generic nudge and let
+the run loop on 40-minute dead turns until aborted.
+
+What changed:
+- `src/code/loop/phases.js` — `WRITE_OR_HOST` now includes `run_command`. The write-first
+  turn's purpose is "stop exploring the empty folder, start producing" — shell is part of
+  producing (env checks, scaffolding, and for build/package goals the packaging command
+  itself). Read/search/preview tools stay withheld; only the one execution tool joins.
+- `src/code/tools/runCode.js` — no change needed: its sub-tool surface mirrors the offered
+  set, so run_code programs on write-first turns can now call `tools.run_command` too.
+- `src/code/loop/turnLoop.js` — bounded empty-reply recovery: when a turn ends with NO
+  content and NO tool calls (a clean stop that produced nothing), the harness pushes ONE
+  targeted "ACT NOW" nudge per run (`session._emptyReplyNudges`, cap 2) telling the model
+  to immediately emit its next tool call, then retries. This is distinct from the
+  finish_reason=length exhaustion path and from the completion gate: an empty reply on a
+  build task is never "done", so it must not be allowed to fall through to generic
+  COMPLETION BLOCKED nudges that loop. After the cap, normal gate logic applies (a run
+  that genuinely has nothing left to do still terminates).
+
+What did NOT change: phase tables for non-write-only turns, explore/verify gating,
+completion gate internals, v54.6 middlewares, chat path, packaging config. The write-first
+filter's original purpose (no read/grep/list of an empty folder) is preserved — the test
+suite asserts it.
+
+Tests: `tests/writeFirstTools.test.js` updated (run_command offered on write-only turns;
+read/search/preview still withheld), new cases in `tests/codeModeCircling.test.js` for the
+empty-reply nudge cap and clean-empty vs length-exhausted classification.
+
+## [54.6.0] - 2026-09-13 — Discipline-enforced coding (Hermes guide port)
+
+User request: compare the Hermes development guide (`code.md`) against Code Mode and
+port its coding-reliability discipline into v54.6. The guide's core insight: telling a
+model "verify your premise / re-read before retrying" in prose is not enough — weak
+local models ignore prose, so the harness must ENFORCE it. Three gaps found (the guide's
+METHOD block was already ported as advice in v51.5; these were never enforced):
+
+1. **Blind retries of failed edits.** When a `patch`/`write_file` failed (stale text,
+   multiple matches), the model routinely re-sent near-identical content — burning turns
+   and sometimes half-applying. The guide: "If an edit fails to apply, re-read the file
+   for its current content instead of retrying the stale text."
+2. **Done-claims with zero read-back.** A run could finish immediately after its last
+   write without ever reading what it wrote — broken imports / mismatched ids only got
+   caught if the completion gate happened to spot them. The guide: GATHER BEFORE CHANGING,
+   VERIFY THE RESULT.
+3. **"Done" while a background build still ran.** v54.5 taught the model to background
+   long builds; nothing stopped it from declaring done before polling one to an exit code
+   — a failed electron-builder left running at run-end read as success.
+
+What changed:
+- `src/code/loop/middleware.js` — three new hooks in `createDefaultMiddleware()`:
+  - `stalePatchGuard`: afterTool records every FAILED write path; beforeTool vetoes any
+    subsequent write to a stale path (`blockedReason: 'stale_write_retry'`) until a
+    successful read_file of that same path clears it (a failed read proves nothing).
+  - `gatherBeforeChange`: beforeDone vetoes ONCE when the run edited files but performed
+    zero reads/greps/globs since its last edit — one forced read-back pass, never a
+    deadlock.
+  - `backgroundJobsSettled`: beforeDone refuses completion (once) while any background job
+    THIS run started (`session._bgJobIds`, fed from `run_command is_background:true` job
+    ids in both the tool path and run_code sub-calls) still reports `running` via
+    `execDeps.jobApi.listJobs()`. An intentionally-persistent server passes on the second
+    attempt.
+- `src/code/loop/turnLoop.js` — bookkeeping beside the existing testRunsSinceEdit block:
+  `_readsSinceLastEdit` counter (incremented by read_file/grep/glob, reset by writes) and
+  the `_bgJobIds` ledger. SYSTEM_PROMPT gains rules 17 (NEVER RETRY A FAILED EDIT BLIND),
+  18 (READ BACK BEFORE DONE), 19 (BACKGROUND JOBS MUST SETTLE).
+- `src/code/tools/runCode.js` — sub-call bookkeeping now uses the SHARED
+  `isVerificationCommand` policy from `src/shared/longBuildPolicy.js` instead of its own
+  inline regex that had drifted (build/package commands counted as verification in the
+  tool path but not inside run_code programs). Reads and background jobs from programs
+  feed the same session counters.
+
+What did NOT change: mode routing, phase tables, completion gate internals, long-build
+timeouts/progress ledger (v54.5), chat path, packaging config. All new enforcement is
+middleware-layer with one-shot escapes — no guard can loop a run forever.
+
+Tests: `tests/reliabilityGuards.test.js` (10 cases: stale-path block/clear semantics incl.
+failed reads, gather veto + one-shot + pass-through, job settle running/exited/foreign/
+inert, full beforeDone chain integration).
+
+## [54.5.0] - 2026-09-12 — Packaging-reliable coding + durable progress ledger
+
+User report: "when I give it coding tasks that also require packaging the assets into
+AppImages or .deb, the process fails. The agent needs to remember what it's done and
+keep on a stable track of everything it's doing." Root causes (four independent killers
+of exactly the packaging task class):
+
+1. **Flat 5-minute command bounds.** `runToolPipeline` wrapped every exclusive tool call
+   in a hard 300 s timeout (`src/code/tools/pipeline.js`) and the Code Mode shell runner
+   SIGTERM'd foreground commands at 300 s (`src/main/ipc/code.js`). electron-builder /
+   `npm run dist` legitimately take 10–60 min on a modest machine — they were killed
+   mid-build every time, and the model read the timeout as "packaging failed".
+2. **Watchdog aborted silent builders.** The run watchdog's inactivity guard only ticks
+   on emitted run events; electron-builder is quiet between phases for minutes at a
+   stretch → healthy builds were declared stalled.
+3. **NO_PROGRESS killed packaging stretches.** `EarlyStopDetector.onProgress` resets only
+   on file writes — packaging runs churn turns touching no project SOURCE files, so 12
+   such turns ended the run with "No files written in 12 turns".
+4. **TEST-BEFORE-DONE ignored builds.** The verification regex counted only test/lint
+   commands; a passing `electron-builder` exit-0 was not verification, so completion kept
+   getting vetoed into a verify phase that re-ran nothing useful.
+
+What changed:
+- NEW `src/shared/longBuildPolicy.js` — single source of truth: which commands are long
+  builds (`isLongBuildCommand`), which count as verification (now including build/package
+  runs), per-call timeout resolution (`exclusiveBoundFor` / `foregroundTimeoutFor`:
+  explicit `timeout_ms` > recognized-build window (default 60 min, env
+  XK_CODE_BUILD_TIMEOUT_MS) > 5-min default; hard ceiling XK_CODE_MAX_CMD_MS = 4 h), and
+  recovery guidance for timed-out builds. Pipeline + shell runner now agree on the bound.
+- `run_command` schema gains `timeout_ms`; description teaches background-and-poll as the
+  preferred strategy for long builds (SYSTEM_PROMPT rule #16 codifies it: never treat a
+  timeout as failure, check release/|dist/ before retrying, verify artifact size).
+- Shell runner emits a 30 s heartbeat while ANY command runs → feeds the run watchdog and
+  surfaces a `tool_heartbeat` event (renderer ignores unknown events — no UI change).
+- NEW `src/code/context/progressLedger.js` — durable on-disk ledger under
+  `.agentsmith/ledgers/<goalhash>.json`: every tool outcome (✓/✗, ref, retry-collapse)
+  recorded as it happens. Injected into the plan anchor block EVERY turn (stable track),
+  persisted in session state for resume, and loaded by goal-hash on a FRESH run of the
+  same task — crash/re-request continuity: "do NOT redo steps already ✓".
+- `EarlyStopDetector.onProgress` accepts `buildProgress`: a completed long build (pass OR
+  fail) resets the no-write counter.
+- Completion gate: `[PACKAGE]` check — when the goal names AppImage/.deb/installer/
+  packaging, completion is blocked until a real artifact (>64 KB *.AppImage/*.deb under
+  release|dist|build|out) exists. Kills "claimed it built, nothing on disk".
+- What did NOT change: chat path, mode routing, THINK toggle, phase router tool sets,
+  background-job registry, agent-mode's own 90 s shell (separate runner), watchdog
+  semantics for genuinely silent runs.
+
+Tests: `tests/longBuildPolicy.test.js`, `tests/progressLedger.test.js`,
+`tests/packagingGate.test.js`.
+
+## [54.4.0] - 2026-09-12 — 🧠 THINK toggle: force model reasoning off from inside the harness
+
+User report: "when I disable thinking in LM Studio it doesn't seem to take effect
+in this harness — we need it as a toggle." Root cause: LM Studio's Thinking/
+Reasoning control is a per-model SETTING in its own UI; requests arriving over the
+OpenAI-compatible API are not guaranteed to inherit it (older builds ignore it, and
+thinking-by-default chat templates like Qwen3 think unless `chat_template_kwargs.
+enable_thinking:false` says otherwise). The harness had that override hard-wired ON
+for qwen-family only (v51.3) — there was no user-facing switch for anything else.
+
+What changed:
+- NEW `src/shared/thinkingToggle.js` (`window.XKThinkingToggle`) — one table-free
+  place producing the wire fields: OFF → `{chat_template_kwargs:{enable_thinking:
+  false}}`; strict mode additionally sends `reasoning_effort:'none'` (LM Studio's
+  native request-level control; NOT sent by default because models without a
+  reasoning control error on it). ON → `{}` — zero new bytes, pre-v54.4 behaviour.
+- UI: 🧠 THINK chip in the quick-toggles row (drives hidden `#thinking-toggle`,
+  mirrored by modeBar like MEM/IMG) + STRICT NO-THINK checkbox in Settings toggles.
+  Both persist to localStorage (`agentsmith_thinking_enabled`,
+  `agentsmith_strict_no_think`). Default: thinking ON.
+- Chat path (`src/renderer/app.js`): toggle overrides merged into the request body
+  AFTER the family harness overrides, so an explicit user OFF always wins.
+- Code Mode: `thinkingEnabled`/`strictNoThink` threaded renderer → `code-run` /
+  `code-resume` / `code-plan-approve` IPC → `runCodeTask` → planning phase + turn
+  loop + milestone subagents → `streamCompletion`, which merges the same overrides.
+  Resumed runs honour the CURRENT toggle state (sessions saved before this field
+  resume with thinking ON).
+- Tests: `tests/thinkingToggle.test.js` (ON sends nothing new; OFF forces
+  enable_thinking:false; strict adds reasoning_effort:none; legacy undefined → ON).
+
+What did NOT change: LM Studio's own setting still applies when THINK is ON; the
+qwen-family auto-override stays; no changes to model harness routing, retries, or
+the Ollama-native chat branch.
+
 ## [54.3.0] - 2026-09-02 — Generation timers hidden: no more glitchy in/out jumps on the live status lines
 
 Release cut from v54.2 after user testing: "everything works but rendering looks

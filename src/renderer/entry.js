@@ -13,6 +13,7 @@ require('../shared/sendSlot.js');      // v53.1: single in-flight send slot — 
 require('../shared/ctxGate.js');
 require('../shared/retryPolicy.js');  // v53.6: hermes-grade transient-failure retry (window.XKRetryPolicy)
 require('../shared/toolResults.js');  // v53.6: honest tool-result classification + timeouts (window.XKToolResults)
+require('../shared/thinkingToggle.js'); // v54.4: 🧠 THINK toggle → request-level thinking overrides (window.XKThinkingToggle)
 require('../code/context/gemmaHarness.js');
 require('../code/context/modelHarness.js');
 require('./timeline/eventAdapter.js');
@@ -34,3 +35,4 @@ require('./ui/sidebarLayout.js');
 require('./ui/modeBar.js');
 require('./ui/modelPicker.js');
 require('./ui/imageGenPanel.js');
+require('./ui/electronAssetsPanel.js'); // v55.3: BUILD ASSETS — depot auto-provisioning progress (window.XKElectronAssetsPanel)

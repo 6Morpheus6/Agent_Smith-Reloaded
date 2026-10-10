@@ -50,7 +50,7 @@ const SYSTEM_PROMPT = `You are Agent Smith, a professional coding agent running 
 
 METHOD (the Hermes standard):
 - GATHER BEFORE CHANGING — read the relevant code before editing it; trace a symbol to its definition and usages rather than guessing its shape. Never invent files, symbols, APIs or imports: if you have not seen it in the project, go look (read_file / grep / glob). Check the project manifest (package.json / pyproject.toml / Cargo.toml) before assuming a library is available.
-- BATCH INDEPENDENT WORK — when several tool calls don't depend on each other's results (reading 3 files, grepping 2 patterns), emit them ALL in ONE reply: they run concurrently and the whole batch costs one round trip instead of N. Only serialize calls that genuinely need an earlier result (read a file before patching it).
+- BATCH INDEPENDENT WORK — when several tool calls don't depend on each other's results (reading 3 files, grepping 2 patterns), emit them ALL in ONE reply: they run concurrently and the whole batch costs one round trip instead of N. Only serialize calls that genuinely need an earlier result (read a file before patching it). EXCEPTION — web_search is NEVER batched: at most ONE search per reply (see NO PARALLEL SEARCHES below).
 - LOOP OVER TOOLS WITH run_code — when a task is "do X for EVERY Y" (syntax-check every changed file, collect test output per module, read 10 files and summarize), write ONE run_code program instead of dozens of sequential tool calls: \`const results = []; for (const f of files) { const r = await tools.read_file({path:f}); ... }\`. Only what you print/return comes back — curate it.
 - EDIT WITH TOOLS — write code through write_file / patch / append_file, never by describing what you would do. Your reply text is NOT the deliverable; files on disk are. Apply the change, then report it briefly.
 - SMALLEST CORRECT CHANGE — match the project's existing style and conventions (naming, formatting, error handling); touch only what the task needs. No drive-by refactors, renames or reformatting. Add every import / dependency your code requires.
@@ -79,7 +79,12 @@ Rules (follow strictly):
     - TypeScript: \`npx tsc --noEmit\` for type checking plus the project's test command.
     - Static HTML/CSS/JS apps: syntax-check every script you wrote or changed with node --check (the harness also smoke-tests the page).
     A successful verification run since your last edit is what unblocks completion — running tests BEFORE editing again does not count. If a check fails, fix it and verify again.
-15. RUN_CODE DISCIPLINE — use run_code for work that loops over tools; do NOT use it to write files (write_file/patch are better: they diff, snapshot for Revert All, and syntax-check). Inside a program: independent reads may be parallelized with Promise.all; writes and commands serialize automatically in submission order. A tool denial THROWS — handle it with try/catch or keep the program small enough that one failure is informative. Keep programs under ~50 sub-calls; for bigger sweeps, split across multiple run_code calls.`;
+15. RUN_CODE DISCIPLINE — use run_code for work that loops over tools; do NOT use it to write files (write_file/patch are better: they diff, snapshot for Revert All, and syntax-check). Inside a program: independent reads may be parallelized with Promise.all; writes and commands serialize automatically in submission order. A tool denial THROWS — handle it with try/catch or keep the program small enough that one failure is informative. Keep programs under ~50 sub-calls; for bigger sweeps, split across multiple run_code calls.
+16. PACKAGING & LONG BUILDS (AppImage / .deb / installer tasks) — a packaging command (electron-builder, npm run dist, pyinstaller, make) can legitimately take 10-60 minutes. NEVER treat a timeout as "the build failed": re-run it with is_background:true and poll read_process_log until the job exits, OR pass timeout_ms sized generously. Before retrying any interrupted build, list the output directory (release/, dist/) first — the artifacts may already exist. Add packaging steps to your milestones, record each build attempt's outcome in .agentsmith/IMPLEMENT.md, and finish by VERIFYING the produced files exist and are non-trivial size (ls -lh) before declaring done. Electron runtimes come from the harness-managed depot cache: commands you run via run_command already carry env pointing \`npm install\` / electron-builder at a local cache of Electron zips + builder toolsets, which the app auto-downloads on first launch (see the BUILD ASSETS sidebar section). Do NOT set up mirrors or pre-download Electron manually. A one-time "downloading electron" in build output is NORMAL when the depot cache doesn't have that version yet — it's a ~120 MB fetch, not a failure; only report the exact failing line if the download itself errors.
+17. NEVER RETRY A FAILED EDIT BLIND — when a patch or write_file FAILS on a path, your picture of that file is wrong. The harness blocks further writes to that path until you read_file it again: read the CURRENT content first, then craft the edit against what you actually saw. Re-sending the same stale text cannot succeed.
+18. READ BACK BEFORE DONE — after your last edit, read (read_file/grep) at least once over the files you changed and confirm the pieces connect: every import exists, ids/selectors match between HTML/CSS/JS, callers use the shape you just wrote. The harness vetoes a done-claim made with zero reads since the last edit.
+19. BACKGROUND JOBS MUST SETTLE — if you started a command with is_background:true (a build, an install), poll read_process_log until it reports an exit code BEFORE declaring done: a failed background build is not "done", and its output names the fix. Exception: a server you intentionally keep running — say so in your summary.
+20. NO PARALLEL SEARCHES — at most ONE web_search call per reply, never several in one turn (batching applies to reads/greps, NOT searches). Each search reads whole pages and burns the context budget; if you need more than one topic, run them SEQUENTIALLY (search → wait for its result → next search) or fold everything into a single well-phrased query.`;
 
 function trackFileTouch(session, name, args, toolResult) {
     if (!toolResult || toolResult.error || toolResult.skipped) return;
@@ -535,10 +540,14 @@ async function runTurnLoop(ctx) {
 
         // No-progress backstop: stop early if the run keeps taking turns (e.g. read-only
         // exploration) without ever writing a file, instead of burning all 40 turns.
+        // v54.5: a completed long build/package command also counts as progress — packaging
+        // runs go many turns without touching source files and used to be killed here.
         const progressCheck = earlyStop.onProgress(new Set(session.filesTouched || []).size, {
-            hadEdit: !!session._turnHadEdit
+            hadEdit: !!session._turnHadEdit,
+            buildProgress: !!session._turnHadBuild
         });
         session._turnHadEdit = false;
+        session._turnHadBuild = false;
         if (progressCheck.stop) {
             emit({ type: 'error', code: 'NO_PROGRESS', message: progressCheck.reason });
             exitReason = progressCheck.reason;
@@ -663,7 +672,10 @@ async function runTurnLoop(ctx) {
                 onState: (state) => emit({ type: 'gen_state', state }),
                 // Constrained tool-call decoding (opt-in) — forces valid tool calls from
                 // local models that otherwise narrate/malform. LM Studio json_schema.
-                constrain: process.env.XK_CODE_CONSTRAIN_TOOLS === '1'
+                constrain: process.env.XK_CODE_CONSTRAIN_TOOLS === '1',
+                // v54.4: 🧠 THINK — per-run thinking state (undefined → ON, pre-v54.4 behaviour).
+                thinkingEnabled: ctx.thinkingEnabled,
+                strictNoThink: ctx.strictNoThink
             });
             if (trace) trace.inferenceOk(Date.now() - inferStart);
             session.stallRetries = 0;
@@ -815,6 +827,10 @@ async function runTurnLoop(ctx) {
             content: msg.content || '',
             tool_calls: msg.tool_calls
         });
+        // v54.7 — a turn that produced tool calls is forward motion; clear the empty-reply
+        // streak so later stalls get their own recovery budget (the no-progress guard still
+        // bounds total turns).
+        if (msg.tool_calls && msg.tool_calls.length) session._consecutiveEmptyReplies = 0;
 
         if (session.workflow === 'executing' && (!msg.tool_calls || !msg.tool_calls.length)
             && /submit_code_plan/i.test(msg.content || '')) {
@@ -840,6 +856,34 @@ async function runTurnLoop(ctx) {
             if (truncated) {
                 if (await recordTruncation(msg)) { finalGate = null; continueLoop = false; break; }
                 continue;
+            }
+            // v54.7 — clean-empty reply recovery: the model stopped with NO content and NO
+            // tool call (finish_reason "stop"). The v52.7 exhaustion path only catches
+            // finish_reason "length", so a reasoning model that burns its whole budget on
+            // internal thinking and then emits an empty stop sailed straight into the
+            // completion gate — which pushed generic COMPLETION BLOCKED nudges and let the
+            // run loop on 40-minute dead turns (the v54.7 circling report). An empty reply
+            // mid-build is never "done": nudge it to ACT NOW, bounded so a model that
+            // genuinely has nothing left still terminates through normal gate logic.
+            const EMPTY_REPLY_LIMIT = Math.max(Number(process.env.XK_CODE_EMPTY_REPLIES) || 0, 2);
+            if (!String(msg.content || '').trim()) {
+                session._consecutiveEmptyReplies = Number(session._consecutiveEmptyReplies || 0) + 1;
+                if (session._consecutiveEmptyReplies <= EMPTY_REPLY_LIMIT) {
+                    emit({
+                        type: 'empty_reply_retry',
+                        turn: session.turn,
+                        attempt: session._consecutiveEmptyReplies,
+                        message: `Model stopped with an empty reply — nudging it to act (${session._consecutiveEmptyReplies}/${EMPTY_REPLY_LIMIT}).`
+                    });
+                    if (trace && trace.verifyBlocked) trace.verifyBlocked('empty reply (clean stop)', session._consecutiveEmptyReplies);
+                    session.messages.push({
+                        role: 'system',
+                        content: '[HARNESS — ACT NOW] Your previous reply was empty: no text and no tool call. Do not summarize, plan, or explain — immediately emit your next tool call. If you are creating files, write_file the first one now (complete content). If a file already exists and needs changes, patch it. If the task requires running something (checks, tests, builds), use run_command.'
+                    });
+                    continue;
+                }
+            } else {
+                session._consecutiveEmptyReplies = 0;
             }
             const reflection = await handleCompletionReflection(
                 ctx, session, planArtifacts, execDeps, emit, trace
@@ -937,12 +981,36 @@ async function runTurnLoop(ctx) {
                         // v51.5 TEST BEFORE DONE tracking: a verification command that PASSED since the last
                         // edit is what unblocks completion; every successful write resets it so each new
                         // state of the code must be re-verified before "done".
+                        // v54.5: shared policy list — build/package commands (electron-builder,
+                        // npm run dist, pyinstaller) count as verification when they exit 0.
+                        const { isVerificationCommand, isLongBuildCommand } = require('../../shared/longBuildPolicy.js');
                         if (name === 'run_command' && !args.is_background) {
                             const cmd = String(args.command || '');
-                            const isVerification = /(test|lint|check|compile|tsc|py_compile|mypy|eslint|jest|vitest|pytest|npm run test|npm run lint)/.test(cmd);
-                            if (isVerification && ok) session.testRunsSinceEdit = true;
+                            if (isVerificationCommand(cmd) && ok) session.testRunsSinceEdit = true;
+                            // A long build finishing (pass OR fail) is forward motion — a failed
+                            // build means the model must read its output and fix, not stall.
+                            if (isLongBuildCommand(cmd)) {
+                                session._turnHadBuild = true;
+                                session.lastBuildRef = `${ok ? 'OK' : 'FAILED'}: ${cmd.slice(0, 140)}`;
+                            }
                         }
                         if (WRITE_TOOLS.has(name) && ok) session.testRunsSinceEdit = false;
+                        // v54.6 gather-before-change tracking: reads since the last successful edit.
+                        // The gatherBeforeChange middleware vetoes completion at 0, so a run can't
+                        // finish blind to what it just wrote.
+                        if (ok && (name === 'read_file' || name === 'grep' || name === 'glob')) {
+                            session._readsSinceLastEdit = Number(session._readsSinceLastEdit || 0) + 1;
+                        }
+                        if (WRITE_TOOLS.has(name) && ok) session._readsSinceLastEdit = 0;
+                        // v54.6 background-job ledger: remember the job ids THIS run started so the
+                        // backgroundJobsSettled middleware can refuse "done" while one is still running.
+                        if (ok && name === 'run_command' && args.is_background) {
+                            const jid = toolResult?.jobId ?? toolResult?.job_id;
+                            if (jid !== undefined && jid !== null) {
+                                if (!session._bgJobIds) session._bgJobIds = new Set();
+                                session._bgJobIds.add(String(jid));
+                            }
+                        }
                         if (ok && WRITE_TOOLS.has(name)) dedup.clearFailures();
                         if (ok && WRITE_TOOLS.has(name)) session._turnHadEdit = true;
                         dedup.recordResult(name, args, ok);
@@ -1028,9 +1096,15 @@ async function runTurnLoop(ctx) {
                             emitPlanProgress(emit, session);
                         }
 
+                        // v54.5: record BOTH outcomes in the ledger — "what already failed" is
+                        // as load-bearing as "what's done" when a run resumes after a crash.
+                        planAnchor.recordDone(`${name} on ${args.path || args.pattern || args.command || ''}`, {
+                            tool: name, ok, ref: args.path || args.pattern || args.command || '',
+                            note: ok ? '' : String(toolResult?.error || toolResult?.message || '').slice(0, 120)
+                        });
+
                         if (ok) {
                             trackFileTouch(session, name, args, toolResult);
-                            planAnchor.recordDone(`${name} on ${args.path || args.pattern || args.command || ''}`);
                             // v52.4 multi-file steering: an HTML write that inlines substantive CSS/JS
                             // (and links no local assets) is the single-file failure mode — nudge ONCE to
                             // split into index.html + style.css + script.js. Never blocks; auto-advance

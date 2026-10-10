@@ -27,6 +27,18 @@ const STUB_TOOL = '[earlier tool output omitted to conserve context]';
 const STUB_MARK = '…[older conversation compacted — see the latest messages for the current task]';
 const CURRENT_TOPIC_MARK = '[CURRENT TOPIC — answer THIS; earlier history is background only, not a task list] ';
 
+// v55.8: deep-research reports (web_search) are the model's ANSWER MATERIAL — the nudge in
+// the report demands a 1500+ word synthesis of it. Capping them at MAX_TOOL_CHARS (1600)
+// destroyed that material before the model ever saw it, so the reply burned its whole output
+// budget on reasoning and ended as a "Compiled from the search results above" regurgitation.
+// Reports in the RECENT window therefore pass through verbatim; only reports pushed OUT of
+// the recent window (older than keepRecentTool) collapse to the stub like any other tool result.
+const DEEP_REPORT_MARK = 'DEEP RESEARCH REPORT';
+
+function isDeepResearchReport(content) {
+    return typeof content === 'string' && content.indexOf(DEEP_REPORT_MARK) !== -1;
+}
+
 // v53.4: turns restored from disk at app launch are stamped `__priorSession` by the
 // renderer (see app.js load path). They are CLOSED history from a previous app session —
 // never live context. Before this, after a fresh start the whole recent-window was made
@@ -148,13 +160,17 @@ function pruneChatHistory(historyArray, opts) {
         }
         if (isPriorSession(m) || (order > -1 && order < toolCutoff)) {
             content = STUB_TOOL;
-        } else if (content.length > MAX_TOOL_CHARS && !content.includes('…[truncated')) {
+        } else if (!isDeepResearchReport(content) && content.length > MAX_TOOL_CHARS && !content.includes('…[truncated')) {
+            // v55.8: deep-research reports are EXEMPT from the size cap while they sit in the recent
+            // window — they ARE the answer material (the report's nudge demands a 1500+ word synthesis
+            // of them). Capping one at MAX_TOOL_CHARS left the model a ~1.6k-char fragment, which is
+            // exactly what made it burn its whole reply on reasoning and end in regurgitation.
             content = content.slice(0, MAX_TOOL_CHARS) + `\n…[truncated ${content.length - MAX_TOOL_CHARS} chars; re-run the tool if you need the rest]`;
         }
         return Object.assign({}, m, { content });
     });
 }
 
-const api = { pruneChatHistory };
+const api = { pruneChatHistory, isDeepResearchReport };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 if (typeof window !== 'undefined') window.XKContextPrune = api;

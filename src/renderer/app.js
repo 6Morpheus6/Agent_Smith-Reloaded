@@ -38,7 +38,9 @@ const WEB_RECEIVE_CHANNELS = [
     'resource-update', 'plugin-ui-event', 'code-event', 'preview-event',
     // v51.8: image-gen progress reaches web/mobile clients too (the main process already
     // broadcasts it over SSE; this only unblocks the client-side listener).
-    'imagegen-event'
+    'imagegen-event',
+    // v55.3: Electron Depot auto-provisioning progress (same SSE broadcast path).
+    'electron-assets-event'
 ];
 
 function createWebApiPolyfill() {
@@ -218,20 +220,61 @@ if (imageGenToggle) {
 }
 
 
-function localSpeak(text) {
-    if (!window.speechSynthesis) {
-        addMessage('system', 'Web Speech API (TTS) is not supported in this browser.');
+// --- TTS (v55.5) — main-process Piper engine; Web Speech API only in browser mode ---
+// v44.2 removed the desktop Piper path and left "browser Web Speech API" as the
+// remaining engine — but Electron on Linux ships NO speech synthesis backend, so
+// utterances were silently dropped (toggle on + prompt = zero audio). The toggle now
+// drives the bundled Piper runtime in the main process (src/main/lifecycle/tts.js);
+// window.speechSynthesis is only used when running as a plain web page.
+let ttsStatusCache = null;      // { ok, engine?, voice?, reason? } from 'tts-status'
+let ttsWarnedBroken = false;    // one honest system note per session when the engine is dead
+
+async function getTtsStatus() {
+    if (!window.api || typeof window.api.invoke !== 'function') return null; // browser mode — no main process
+    if (ttsStatusCache) return ttsStatusCache;
+    try {
+        ttsStatusCache = await window.api.invoke('tts-status');
+    } catch (err) {
+        ttsStatusCache = { ok: false, reason: `status probe failed: ${err.message}` };
+    }
+    return ttsStatusCache;
+}
+
+function ttsBrokenNote(reason) {
+    if (ttsWarnedBroken) return; // don't spam a system message on every response
+    ttsWarnedBroken = true;
+    addMessage('system', `TTS unavailable — ${reason}. SPEAK RESPONSES is on but no audio engine could be started.`);
+}
+
+async function localSpeak(text) {
+    const plain = String(text || '').trim();
+    if (!plain) return;
+
+    // 1) Electron: main-process Piper (bundled runtime + en_US-joe-medium voice).
+    if (window.api && typeof window.api.invoke === 'function') {
+        try {
+            const status = await getTtsStatus();
+            if (!status.ok) { ttsBrokenNote(status.reason || 'unknown reason'); return; }
+            const res = await window.api.invoke('tts-speak', plain);
+            if (res && res.error) ttsBrokenNote(res.error); // one-time note, then stay quiet
+        } catch (err) {
+            ttsBrokenNote(err.message || String(err));
+        }
         return;
     }
-    // Cancel any ongoing speech
-    window.speechSynthesis.cancel();
-    
-    const utterance = new SpeechSynthesisUtterance(text);
-    // Use a slightly more natural rate
+
+    // 2) Browser mode: Web Speech API (works where the browser has a voice backend).
+    if (!window.speechSynthesis) { ttsBrokenNote('Web Speech API is not supported in this browser'); return; }
+    window.speechSynthesis.cancel(); // newest response wins — cancel any ongoing speech
+    const utterance = new SpeechSynthesisUtterance(plain);
     utterance.rate = 1.0;
     utterance.pitch = 1.0;
-    
     window.speechSynthesis.speak(utterance);
+}
+
+// Probe the engine at startup so the first TEST click / first response is instant.
+if (window.api && typeof window.api.invoke === 'function') {
+    getTtsStatus().catch(() => {});
 }
 const netrunnerToggle = document.getElementById('netrunner-toggle');
 const exportBtn = document.getElementById('export-btn');
@@ -295,6 +338,11 @@ const codeIsolatedToggle = document.getElementById('code-isolated-toggle');
 const codeParallelMilestonesToggle = document.getElementById('code-parallel-milestones-toggle');
 const codeMilestoneWorktreesToggle = document.getElementById('code-milestone-worktrees-toggle');
 const codeMilestoneConcurrentToggle = document.getElementById('code-milestone-concurrent-toggle');
+// v54.4: 🧠 THINK — model reasoning toggle (chip-driven). Unchecked forces thinking off on
+// every request body (chat + Code Mode) via src/shared/thinkingToggle.js, because LM Studio's
+// per-model Thinking/Reasoning UI setting does not reliably apply to API requests.
+const thinkingToggle = document.getElementById('thinking-toggle');
+const strictNoThinkToggle = document.getElementById('strict-no-think-toggle');
 const codeReadinessChip = document.getElementById('code-readiness-chip');
 const codeStatusBar = document.getElementById('code-status-bar');
 const codeReviewMount = document.getElementById('code-review-mount');
@@ -504,10 +552,25 @@ if (window.XKRuntimeProfileUI) {
         sliders: { tempSlider, tempVal, ctxSlider, ctxVal },
         chipEl: document.getElementById('runtime-profile-chip'),
         toggleEl: document.getElementById('auto-tune-toggle'),
+        // v55.9.2 — explicit APPLY button next to the ctx slider (manual ctx reload).
+        applyBtn: document.getElementById('ctx-apply-btn'),
         getApiBaseUrl: () => effectiveApiBase(),
         isBusy: () => chatRunState.isBusy || codeRunState.isBusy
     });
 }
+
+// v55.9.2 — MANUAL CTX APPLY: the user set a context value on the slider (any value, including
+// above the 32000 minimum) and presses APPLY → reload LM Studio at exactly that window. The UI
+// module mirrors what actually loaded back onto the slider + chip (VRAM fallbacks included).
+(function wireCtxApplyButton() {
+    const btn = document.getElementById('ctx-apply-btn');
+    if (!btn || !window.XKRuntimeProfileUI?.applyCtx) return;
+    btn.addEventListener('click', () => {
+        try {
+            window.XKRuntimeProfileUI.applyCtx(modelSelect?.value, ctxSlider?.value);
+        } catch (e) { console.warn('[CTX APPLY] failed:', e); }
+    });
+})();
 
 // Manual tuning (temperature, thinking steps, context window) is only meaningful when
 // Auto-tune is OFF — otherwise the runtime profile overwrites the sliders per model +
@@ -632,6 +695,31 @@ if (codeMilestoneConcurrentToggle) {
     });
 }
 
+// --- v54.4: 🧠 THINK (model reasoning) toggle -------------------------------------
+// Default ON (checkbox checked): thinking behaves exactly as before this version —
+// LM Studio's setting + the family harness decide. OFF forces it off per request.
+if (thinkingToggle) {
+    if (localStorage.getItem('agentsmith_thinking_enabled') === 'false') thinkingToggle.checked = false;
+    thinkingToggle.addEventListener('change', () => {
+        localStorage.setItem('agentsmith_thinking_enabled', thinkingToggle.checked ? 'true' : 'false');
+    });
+}
+if (strictNoThinkToggle) {
+    if (localStorage.getItem('agentsmith_strict_no_think') === 'true') strictNoThinkToggle.checked = true;
+    strictNoThinkToggle.addEventListener('change', () => {
+        localStorage.setItem('agentsmith_strict_no_think', strictNoThinkToggle.checked ? 'true' : 'false');
+    });
+}
+
+// Single source of truth for every request-body builder (chat path here, Code Mode
+// via the deps below). Absent checkbox (older DOM) === thinking ON.
+function getThinkingEnabled() {
+    return window.XKThinkingToggle?.isThinkingEnabled?.(thinkingToggle ? thinkingToggle.checked : true) !== false;
+}
+function getStrictNoThink() {
+    return !!(strictNoThinkToggle && strictNoThinkToggle.checked);
+}
+
 if (window.XKCodeMode) {
     codeModeHandler = window.XKCodeMode.mount({
         codeRunState,
@@ -642,6 +730,9 @@ if (window.XKCodeMode) {
         getNumCtx: () => parseInt(ctxSlider?.value || '8192', 10),
         getMaxTurns: () => window.XKRuntimeProfileUI?.getMaxTurns?.() ?? -1, // v52.7: infinite turns (-1 sentinel)
         getCodeTemperature: () => window.XKRuntimeProfileUI?.getCodeTemperature?.() ?? 0.2,
+        getThinkingEnabled,   // v54.4: 🧠 THINK — forwarded into every code-run/code-resume payload
+        getStrictNoThink,     // v54.4: strict reasoning_effort:'none' companion setting
+        getSudoPassword: () => sudoInput?.value || '', // v55.2: SUDO OVERRIDE → per-run elevated commands
         getRequirePlanApproval,
         getGrindMode,
         getIsolatedRun,
@@ -980,9 +1071,11 @@ async function fetchRemoteQrPayload() {
 }
 
 // 📱 composer button → QR to open the web UI on your phone (scan to open).
-// Pointless when you're already in a browser/phone (web mode), so hide it there.
-if (isWebMode && phoneConnectBtn) phoneConnectBtn.style.display = 'none';
-if (phoneConnectBtn && !isWebMode) {
+// Shown in Electron AND web mode: in a browser (Pinokio-style simulated Electron)
+// you still want to scan the QR with your real phone. On phone-width viewports the
+// whole .input-area is replaced by the mobile FAB composer (see base.css), so this
+// button never appears there anyway — hiding it by isWebMode alone was wrong.
+if (phoneConnectBtn) {
     phoneConnectBtn.addEventListener('click', async () => {
         showQrModal({
             title: 'OPEN ON YOUR PHONE',
@@ -1129,10 +1222,22 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && qrModal?.classList.contains('qr-modal--open')) closeQrModal();
 });
 
-// --- TTS (browser Web Speech API only; Piper removed) ---
+// --- TTS (v55.5) — TEST button exercises the same Piper path as responses ---
 if (testAudioBtn) {
-    testAudioBtn.addEventListener('click', () => {
-        localSpeak('Agent Smith audio is operational.');
+    testAudioBtn.addEventListener('click', async () => {
+        try {
+            if (window.api && typeof window.api.invoke === 'function') {
+                const status = await getTtsStatus();
+                if (!status.ok) { ttsBrokenNote(status.reason || 'unknown reason'); return; }
+                const res = await window.api.invoke('tts-speak', 'Agent Smith audio is operational.');
+                if (res && res.error) ttsBrokenNote(res.error);
+                else showToast(`🔊 TTS test — Piper (${status.voice})`);
+            } else {
+                localSpeak('Agent Smith audio is operational.');
+            }
+        } catch (err) {
+            ttsBrokenNote(err.message || String(err));
+        }
     });
 }
 
@@ -2757,7 +2862,7 @@ async function sendMessage() {
         return;
     }
 
-    // v51.5 MIN-CTX GATE — Agent Smith requires at least 64K of context for any model in use:
+    // v51.5 MIN-CTX GATE (v55.4: 32K) — Agent Smith requires at least 32K of context for any model in use:
     // below that, multi-turn agent work loses the plot across turns/files. Verify against what
     // LM Studio ACTUALLY has loaded right now (the user's own setting wins over app defaults).
     // Unverifiable endpoints (remote server, LM Studio down) stay usable — the gate only fires
@@ -2768,12 +2873,35 @@ async function sendMessage() {
             const v = await window.XKRuntimeProfileUI?.refreshCurrentLoadedContext?.();
             if (typeof v === 'number' && Number.isFinite(v) && v > 0) verified = v;
         } catch (e) { /* verification is advisory; fall through with no gate */ }
-        const verdict = window.XKCtxGate.checkCtxGate(verified ? { managed: true, model, loadedContext: verified } : null);
+        let verdict = window.XKCtxGate.checkCtxGate(verified ? { managed: true, model, loadedContext: verified } : null);
+        if (!verdict.ok) {
+            // v55.9.1 — MIN-CTX AUTO-RELOAD: the refresh above just kicked off an automatic LM Studio
+            // reload of THIS model at the floor (fire-and-forget from refreshLoadedContext). Join that
+            // in-flight fix and re-check, so the user's message goes out against the FIXED window
+            // instead of being walled off while the fix runs. No-op when auto-tune is off / a manual
+            // override is active (nothing was kicked off) or no reload is running.
+            try {
+                if (await window.XKRuntimeProfileUI?.awaitMinCtxReload?.(model)) {
+                    const v2 = await window.XKRuntimeProfileUI?.refreshCurrentLoadedContext?.();
+                    verdict = window.XKCtxGate.checkCtxGate(typeof v2 === 'number' && Number.isFinite(v2) && v2 > 0 ? { managed: true, model, loadedContext: v2 } : null);
+                }
+            } catch (e) { /* auto-fix is advisory — fall through to the gate below */ }
+        }
         if (!verdict.ok) {
             trace.addStep('routing.ctx_gate', 'routing', 'error', 'CTX_BELOW_MIN', 0, `loaded ${verdict.loadedContext} < min ${verdict.minCtx}`);
             trace.close();
             releaseSendSlot(); // v53.1: early return — give the slot back so the user can retry
-            addMessage('system', `**Minimum context not met.** ${verdict.message}`);
+            let msg = verdict.message;
+            try {
+                const st = window.XKRuntimeProfileUI?.getMinCtxReloadState?.(model);
+                if (st && st.state === 'backoff') {
+                    // The auto-reload tried and could not reach the floor (VRAM) — say so, and that it retries.
+                    msg = `Auto-tune tried to reload \`${model}\` at ${st.min} tokens but LM Studio could not reach that window (not enough VRAM). It will keep retrying automatically; in LM Studio you can also unload the model and reload it with a context length of ${st.min} or higher.`;
+                } else if (st && st.state === 'in_flight') {
+                    msg = `Auto-tune is reloading \`${model}\` at ${st.min} tokens right now — try sending again in a moment.`;
+                }
+            } catch (e) { /* keep the default message */ }
+            addMessage('system', `**Minimum context not met.** ${msg}`);
             return;
         }
     }
@@ -2987,6 +3115,11 @@ My Query: ${text}`;
         // batches in a row it gets one firm nudge to change approach or report honestly;
         // after 5 the run ends with what we have instead of burning the user's GPU.
         let toolFailStreak = 0;
+        // v55.8: LIMITLESS RESEARCH BUDGET — set once this run has auto-expanded LM Studio's
+        // context window to the model's maximum after a mid-run overflow. The expansion is
+        // per-run (a later run re-evaluates) and one-shot (if it overflows AGAIN at max, the
+        // history is genuinely too big — the honest error surfaces instead of looping).
+        let ctxAutoExpanded = false;
         window._recentToolSigs = []; // per-run sliding window for the anti-loop guard
         // v52.7: INFINITE TURNS — no step cap. The "Thinking Steps" slider is gone; a run
         // ends only when the model stops calling tools, the user hits Stop, or a hard
@@ -3112,6 +3245,15 @@ My Query: ${text}`;
                 // family wins over our defaults; unknown providers ignore the key harmlessly.
                 const _bodyOverrides = window.XKModelHarness?.bodyOverridesFor?.(model) || {};
                 for (const [k, v] of Object.entries(_bodyOverrides)) body[k] = v;
+
+                // v54.4 — 🧠 THINK toggle: when OFF, force thinking off on the wire regardless
+                // of what LM Studio's own UI setting says (the per-model setting does not apply
+                // to API requests on every build). When ON we send nothing new — family overrides
+                // above and LM Studio's setting keep working.
+                const _thinkOverrides = window.XKThinkingToggle?.thinkingBodyOverrides?.(
+                    getThinkingEnabled(), { strict: getStrictNoThink() }
+                ) || {};
+                for (const [k, v] of Object.entries(_thinkOverrides)) body[k] = v;
                 
                 // LM Studio strictly enforces tool payload schemas
                 if (activeTools.length > 0) {
@@ -3285,6 +3427,35 @@ My Query: ${text}`;
                 // a context overflow says "lower the context slider", a load failure says
                 // "pick a model that fits VRAM" — never a raw engine dump the user can't act on.
                 const classified = window.XKStreamSignals?.classifyHttpError?.({ status: res.status, body: errorText });
+                if (classified && classified.isContextOverflow && !ctxAutoExpanded) {
+                    // v55.8: LIMITLESS RESEARCH BUDGET — the prompt outgrew LM Studio's loaded
+                    // context window MID-RUN (deep-research reports are big by design). Instead of
+                    // ending with "lower your context slider", expand the window to the model's
+                    // maximum and retry this exact turn: a deep-research run must be able to keep
+                    // going, not die on its own findings. One-shot per run (ctxAutoExpanded) — if
+                    // it overflows AGAIN at max, the history is genuinely too big and the honest
+                    // error below surfaces instead of looping.
+                    console.warn('[GUARD RAIL] Context overflow mid-run — auto-expanding LM Studio context to model maximum for this run.');
+                    let expanded = false;
+                    try {
+                        const st = await window.api.invoke('lmstudio-get-status', { apiBaseUrl: effectiveApiBase(), model });
+                        if (st && st.managed === true) {
+                            const maxCtx = Number(st.maxContext);
+                            if (Number.isFinite(maxCtx) && maxCtx > 0 && maxCtx !== Number(st.loadedContext)) {
+                                botDiv.innerHTML += `<br><br><span style="color:var(--warning-color); font-size: 0.85rem;"><strong>Research context outgrew the loaded window — reloading LM Studio at ${maxCtx} tokens (one-time, this run) and continuing…</strong></span>`;
+                                const ensured = await window.api.invoke('lmstudio-ensure-model', { apiBaseUrl: effectiveApiBase(), model, contextLength: maxCtx });
+                                expanded = !!(ensured && ensured.managed === true && Number(ensured.loadedContext) === maxCtx);
+                            }
+                        }
+                    } catch (eExpand) { console.warn('[GUARD RAIL] Context auto-expand failed:', eExpand); }
+                    ctxAutoExpanded = true; // one-shot: whether or not we grew, never loop on this run
+                    if (expanded) {
+                        try { window.XKRuntimeProfileUI?.markSwapHandled?.(model); } catch (_) { /* optional */ }
+                        continue; // same turn, fresh request — the model now has its full window
+                    }
+                    // No room to grow (already at max / unmanaged endpoint / expand failed) —
+                    // fall through to the honest error below.
+                }
                 if (classified && classified.message) throw new Error(classified.message);
                 throw httpErr;
             }

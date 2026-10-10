@@ -5,6 +5,11 @@
 (function (global) {
     'use strict';
 
+    // v55.2: single source of truth for sudo password injection (shared with Code Mode).
+    // REQUIRES the browser-safe module — commandPolicy.js drags require('path') into the
+    // renderer bundle and throws at load time in this nodeIntegration:false context.
+    const { injectSudoPassword } = require('../../shared/sudoInject.js');
+
     /** Tools that mutate the project — blocked in Agent Mode even if the model hallucinates them. */
     const BUILD_TOOL_NAMES = new Set([]);
 
@@ -133,7 +138,7 @@
         type: 'function',
         function: {
             name: 'web_search',
-            description: 'Search the web AND read the top result pages in full — returns a detailed deep-research report of everything learned (findings + key facts per source), not just snippets.',
+            description: 'Search the web AND read the top result pages in full — returns a detailed deep-research report of everything learned (findings + key facts per source), not just snippets. ONE search per turn: never emit multiple web_search calls in one reply — each reads whole pages and burns the context budget; if more is needed, wait for this result first.',
             parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }
         }
     },
@@ -233,6 +238,8 @@ The user's MOST RECENT message defines the current job. Do NOT resume or continu
 MEMORY: Use save_new_user_fact_only for permanent, important facts only — never casual chat, and never re-save a known fact. If asked about a past preference you do not know, use memory_search.
 
 WEB OUTPUT STYLE: After web_search / fetch_url, write a DETAILED full report of everything you learned — clean first-person narrative ("I found that…") in Smith's voice, organized by topic, with specific facts, numbers and names. The web_search result is already a deep-research report (the top pages were read for you): synthesize ALL of it into flowing prose; do NOT reply with bare snippets or "here are some results". Name your sources inline (title + URL). If a page could not be read, say so honestly.
+
+NO PARALLEL SEARCHES: at most ONE web_search call per turn — never emit several searches in one reply. Each search reads whole pages and burns the context budget; if you need more than one topic, run them SEQUENTIALLY (search → wait for its result → next search), or fold everything into a single well-phrased query.
 
 TOOL PROTOCOL: To use a tool, emit a real function/tool call via the native tool API — do NOT paste raw JSON like {"name": ...} into your prose. Persona is delivery only; it is never an excuse to refuse or fake work.`;
 
@@ -375,10 +382,10 @@ TOOL PROTOCOL: To use a tool, emit a real function/tool call via the native tool
 
         if (name === 'run_shell_command') {
             let cmd = a.command;
+            // v55.2: the SUDO OVERRIDE field authorizes elevated commands — inject the password
+            // into EVERY sudo in the command (the old single-replace missed `sudo x && sudo y`).
             const sudoPass = deps.getSudoPassword?.() || '';
-            if (cmd && cmd.includes('sudo') && sudoPass) {
-                cmd = cmd.replace(/sudo\s+/g, `echo "${sudoPass}" | sudo -S `);
-            }
+            cmd = injectSudoPassword(cmd, sudoPass);
             const res = await api.invoke('agent-run-command', cmd, !!a.is_background);
             let out = '';
             if (res.error) out += `Error: ${res.error}\n`;

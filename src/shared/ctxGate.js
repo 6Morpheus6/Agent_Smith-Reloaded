@@ -4,7 +4,7 @@
  *
  * Two rules, both about HONESTY with the model that is actually loaded in LM Studio:
  *
- * 1. MINIMUM CTX GATE — Agent Smith needs at least 64K of context for any model it uses.
+ * 1. MINIMUM CTX GATE — Agent Smith needs at least 32K of context for any model it uses.
  *    Below that window multi-turn agent work (and every Code Mode build) loses the plot.
  *    The gate only fires when the local server can VERIFY the loaded size; an unmanaged or
  *    unreachable endpoint cannot be judged, so chat stays usable there.
@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const DEFAULT_MIN_CTX = 64000;
+const DEFAULT_MIN_CTX = 32000; // v55.4: lowered from 64000 (user request — smaller local models)
 // Slider bounds kept in one place so reflection never writes values the UI cannot display.
 const CTX_SLIDER_MIN = 2048;
 const CTX_SLIDER_MAX = 262144;

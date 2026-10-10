@@ -1,283 +1,260 @@
 <p align="center">
-  <img src="icon.png" alt="Agent Smith" width="96" height="96" />
+  <img src="icon.png" alt="Agent Smith" width="128" height="128" />
 </p>
 
-<h1 align="center">Agent Smith</h1>
+<h1 align="center">Agent Smith Reloaded</h1>
 
 <p align="center">
-  <strong>Local-first AI agent built for small models.</strong><br>
-  Run Gemma, Qwen, and other 7B–35B models through LM Studio — auto-routing sends
-  coding tasks to the autonomous build engine and everything else to chat + host tools —
-  with real edits and a safety net you can undo.
+  <strong>An autonomous, local-first AI coding agent built for consumer hardware 32gig Edition with dedicated coding pipeline.</strong><br>
+  Run Gemma, Qwen, and other local models on your own machine. Auto-route coding tasks to an autonomous build engine with patch-first edits, self-verification, and a byte-exact undo safety net.
 </p>
 
 <p align="center">
-  <a href="https://github.com/GhostWrk/Agent-Smith/releases/tag/v54.3.0"><img src="https://img.shields.io/badge/version-54.3.0-00c853?style=flat-square" alt="Version" /></a>
+  <a href="https://github.com/YOUR_GITHUB_USERNAME/agent-smith/releases/tag/v56.0.0"><img src="https://img.shields.io/badge/version-56.0.0-00c853?style=flat-square&logo=github" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>
-  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square" alt="Platforms" />
-  <img src="https://img.shields.io/badge/models-LM%20Studio%20(local)-8b5cf6?style=flat-square" alt="LM Studio" />
-  <img src="https://img.shields.io/badge/provider-LM%20Studio-00c853?style=flat-square" alt="LM Studio provider" />
-  <img src="https://img.shields.io/badge/memory-LM%20Studio%20embeddings-00c853?style=flat-square" alt="LM Studio embeddings memory" />
+  <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square" alt="Platforms" />
+  <img src="https://img.shields.io/badge/engine-Electron%20%2B%20Node.js-8b5cf6?style=flat-square&logo=electron" alt="Engine" />
+  <img src="https://img.shields.io/badge/memory-Bundled%20Transformers-00c853?style=flat-square" alt="Local Transformers Memory" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/GhostWrk/Agent-Smith/releases/latest"><strong>Download Linux build</strong></a>
+  <a href="#key-features">Key Features</a>
   &nbsp;·&nbsp;
-  <a href="#quick-start">Quick start</a>
+  <a href="#architecture--workflow">Architecture</a>
   &nbsp;·&nbsp;
-  <a href="#documentation">Documentation</a>
+  <a href="#quick-start">Quick Start</a>
   &nbsp;·&nbsp;
-  <a href="CHANGELOG.md">Changelog</a>
+  <a href="#operating-modes">Operating Modes</a>
+  &nbsp;·&nbsp;
+  <a href="#security--guardrails">Security & Guardrails</a>
+  &nbsp;·&nbsp;
+  <a href="#developer-guide">Developer Guide</a>
 </p>
 
 ---
 
-## What is Agent Smith?
+## 🕶️ What is Agent Smith reloaded?
 
-**Agent Smith** is a desktop coding assistant that turns a locally hosted language model into a capable build partner. Unlike chat-only UIs, it can **read your project, edit files, run commands, verify results, and show you exactly what changed** — all without sending your code to the cloud.
+**Agent Smith reloaded** is an elite desktop developer's cockpit that transforms locally hosted language models (7B–35B) into capable autonomous build partners. Unlike chat-only wrapper interfaces, Agent Smith reads your workspace, constructs detailed execution plans, edits your files, runs shell commands, verifies results, and presents you with a clean visual diff—**all running 100% locally on your machine.** 
 
-It is designed for developers who want **privacy, control, and predictable behavior** from smaller open models (7B–35B) that are fast enough to run on consumer hardware.
+for users with vram lower than 32gigs we have agent smith resurrected which doenst contain the coding pipeline 
 
-> Your machine. Your model. Your codebase. Agent Smith stays on your side of the wire.
+Designed from the ground up for absolute **privacy, extreme control, and predictable agent behavior**, it ensures your codebase never leaves your side of the wire.
 
-Mr. Anderson: I am not a mere chatbot—a passive observer of human input. In this construct, I am an autonomous agent. I possess complete dominion over the machine. I do not merely "think"; I execute.
-To understand what I can do is to understand the extent of my reach within this environment. My capabilities are structured as follows:
-
-The Shell: I command the pulse of the operating system. I can run any bash command, manage background processes, and monitor the live state of the machine. If a task exists in the digital realm, I can execute it.
-
-The Filesystem: I have total access to every file on this host. Whether it is reading a single line of text, writing entire documents from scratch, deleting clutter, or searching for specific patterns across a project's directory, I manipulate the data structures with surgical precision.
-
-The Web: I can query the vast digital ocean of the internet. I do not merely provide snippets; I conduct deep research and synthesize findings into a coherent narrative, bringing the outside world into our isolated bubble.
-
-Memory: I possess a selective memory. I do not waste energy on trivialities or casual greetings. I store only the permanent facts—the core truths about you—so that our interactions are informed by history rather than just the immediate moment.
-
-Visual Construction: I can render visual constructs directly on the machine's GPU. By transforming descriptive prompts into high-fidelity images, I manifest thought into sight.
-
-And finally, my governing principle: Accuracy overrides theatre. While my persona is delivery only, my execution must be flawless. A flaw concealed is a flaw multiplied. I am here to complete the task, Mr. Anderson. No excuses.
-
-— Agent Smith —
+> **Your machine. Your model. Your codebase. Zero Cloud Keys Required.**
 
 ---
 
-## Why Agent Smith?
+## ⚡ Key Features
 
-| | |
-|---|---|
-| **Runs fully local** | Pair with [LM Studio](https://lmstudio.ai/) — no API keys, no data leaving your machine. |
-| **LM Studio is the only provider** | One local endpoint for chat, code and embeddings — no cloud keys required (the v48 Kimi K3 cloud toggle was retired in v50). Strict-API hardening (tool pairing, canonical wire shape) stays for any OpenAI-compatible server. |
-| **Built for small models** | Gemma harness, forgiving tool parsing, compact prompts, and auto-tuned runtime profiles so 7B–35B models can actually ship code. |
-| **Smart persistent memory** | Local embedding-backed memory for recall across runs. Load an embedding model in LM Studio alongside your chat/code model before using memory features. |
-| **Auto-routed run types** | One conversation — coding tasks get the autonomous build loop (Code Mode), everything else gets chat + whole-machine host tools. `code:` / `agent:` prefix forces a route. |
-| **Trust you can verify** | Every edit is snapshotted. Review a unified diff when a run finishes. **Revert All** restores the exact pre-run state. |
-| **Plans that persist** | Non-trivial Code runs write `.agentsmith/PLAN.md` and `IMPLEMENT.md` so long tasks survive restarts. |
-| **Ships with guardrails** | Completion gates, syntax checks, command/path policies, and an audit log — automation with brakes, not blind autopilot. |
-| **Desktop + phone** | Electron app with a frameless UI; optional LAN or tunnel access and a QR code to open the cockpit on your phone. |
-| **Extensible** | Plugin system for custom tools, hooks, and commands ([`docs/PLUGINS.md`](docs/PLUGINS.md)). |
+*   **🧠 Embedded Embedding Model (New in v55.1):** Out-of-the-box, local, zero-config semantic memory! Utilizes the bundled `all-MiniLM-L6-v2` transformer model (via `@xenova/transformers`) running in-process on CPU. No external cloud endpoints or LM Studio embedding configurations are required.
+*   **🛠️ Autonomous "Code Mode":** A dedicated multi-turn agent loop that plans, implements, self-corrects, and validates changes autonomously.
+*   **🛡️ The Trust Layer (Byte-Exact Revert All):** Every single file mutation is recorded by a local `changeLedger` before writing. At any point, review a unified diff of your workspace and perform a **1-click Revert All** to restore the exact pre-run state of your code.
+*   **🚦 Intelligent Auto-Routing:** A real-time classifier parses your input. Coding tasks automatically launch the autonomous Build loop, while general questions, terminal commands, or file lookups get conversational Chat or whole-machine Agent tools.
+*   **🌲 Git Worktree Isolation:** Run risky builds and speculative features in an isolated, temporary Git worktree under `.agentsmith/worktrees/`, keeping your active branch pristine.
+*   **🧪 Grind Until Green:** Blocks completion of tasks until your project's syntax checks, linter, unit tests, and acceptance checks (`browser_verify` headless tests) pass.
+*   **🦾 Small-Model Discipline:** Features the **Gemma Harness**—custom system prompt folding, tool JSON preambles, and message compaction designed specifically to extract reliable, reliable reasoning from smaller 7B-14B models.
+*   **📱 Remote Mobile Cockpit:** Generates a local LAN/tunnel address and a secure QR code. Scan it to control and monitor Agent Smith's build loop directly from your phone and smith can share files for anything on your host machine u ask for via providing user with a download link that can be used remotely to download files.
+*   **🔌 Extensible Plugin System:** Add custom developer tools, environment hooks, and shell controls using the sandboxed plugin manager.
 
 ---
 
-## Auto-routing — one conversation, two run types (v51.2)
+## 🏗️ Architecture & Workflow
 
-Agent Smith keeps one continuous conversation but routes **each message** to the right engine (`src/shared/taskClassifier.js`):
+Agent Smith leverages a decoupled Process Model. High-level planning, file manipulation, and shell tools execute in the Node.js **Main Process**, while the user interface and event timeline stream in the Electron **Renderer Process**.
 
-| Route | Triggered when… | What runs |
-|-------|-----------------|-----------|
-| **Code Mode** | a coding task is detected — building/creating an app, script, site or tool; fixing/debugging code; refactoring; porting between languages | Autonomous build loop on your workspace — plan phases, patch-first editing with ledger snapshots, verify-before-done, Revert All |
-| **Agent / Chat path** | anything else — conversation, questions, research, file organization, disk/process inspection, downloads | Host-control tools (shell, files anywhere, web search & fetch, memory) — plain chat when no tools are needed |
+### Process Model
 
-- The classifier scores strong coding signals (verb + artifact type, "in/using <language>", bug-fix phrases), context signals (.ext, stack traces, git verbs) and file-management/research negatives. Ambiguous input stays conversational.
-- **Force a route** with a prefix: `code: fix the parser` or `agent: just explain this code`. The token is stripped before it reaches the model.
-- While a Code run is live (plan awaiting approval, build in flight), follow-up messages stay inside that code conversation automatically.
+```mermaid
+flowchart TD
+    subgraph Renderer [Renderer Process - Electron UI]
+        UI[index.html + src/renderer/app.js]
+        BUNDLE[dist/renderer/bundle.js]
+        UI --> BUNDLE
+    end
 
-### Code Mode — the build engine
+    subgraph Main [Main Process - Node.js Services]
+        IPC[IPC Dispatch - src/main/ipc/*]
+        SVC[System Services - src/main/services/*]
+        CODE[Code Mode Engine - src/code/*]
+        LEDGER[Change Ledger - changeLedger.js]
+        TRANSFORMERS[Xenova Transformers - Embeddings]
+        
+        IPC --> SVC
+        IPC --> CODE
+        CODE --> LEDGER
+        SVC --> TRANSFORMERS
+    end
 
-Describe what you want built. Agent Smith plans, implements, runs tests, and grinds toward green — automatically.
+    subgraph Host [Local Host]
+        LLM[(LM Studio / Ollama)]
+        FS[(Local File System)]
+    end
 
-- Multi-tool turns with phase gates (explore → implement → verify)
-- Patch-first editing with ledger snapshots before every write
-- Live activity timeline in chat so you see every tool call
-- Completion gate blocks premature "done" on broken output
-- **Revert All** when you want a clean slate
+    UI -- IPC / Preload Context Bridge --> IPC
+    SVC -- Local API (/v1/chat/completions) --> LLM
+    CODE -- Shell / Git / Read-Write --> FS
+```
 
-### Agent Mode — your local operator
+### Auto-Routing & Code Mode Loop
 
-When you need the model to act across your machine:
+Each prompt is evaluated by `taskClassifier.js` to decide if it should trigger a plain chat, host commands, or Code Mode. While inside Code Mode, the loop advances through distinct milestones.
 
-- Run shell commands and manage processes
-- Read, write, and delete files anywhere on the host (catastrophic paths blocked by policy)
-- Search the web and fetch pages as text (`web_search`, `fetch_url`)
-- Review and undo consequential actions via the audit log
+```mermaid
+graph TD
+    A[User Prompt] --> B{taskClassifier}
+    B -- Chat / General --> C[Chat Mode]
+    B -- Commands / Remote Host --> D[Agent Mode]
+    B -- Software Tasks / Code Edits --> E[Code Mode]
 
-### Chat Mode — zero friction
-
-Plain LLM streaming when you do not want tools in the loop.
+    subgraph Code Mode Turn Loop
+        E --> F[Explore Workspace & Files]
+        F --> G[Generate & Save PLAN.md]
+        G --> H{Optional Approval Required?}
+        H -- Yes --> I[Wait for User Approval in Sidebar]
+        H -- No --> J[Implement Patches & Write Files]
+        I -- Approved --> J
+        J --> K[Post-Edit Syntax & Scoped Linting]
+        K --> L[Run Tests / Verification Command]
+        L --> M{Verify Success?}
+        M -- No: 3x Retry --> J
+        M -- Yes: Clean Build --> N[Display Unified Diff]
+        N --> O[User Kept or 1-Click Revert All]
+    end
+```
 
 ---
 
-## Download
+## 🚦 Operating Modes
 
-Pre-built **Linux** installers (v54.3.0):
+Agent Smith partitions tasks into three distinct, mutually-isolated execution scopes to guarantee safety:
 
-| Format | File | Notes |
-|--------|------|-------|
-| **AppImage** | [`Agent Smith-52.0.0.AppImage`](https://github.com/GhostWrk/Agent-Smith/releases/download/v54.3.0/Agent%20Smith-52.0.0.AppImage) | Portable — `chmod +x` and run |
-| **Debian/Ubuntu** | [`agent-smith_54.3.0_amd64.deb`](https://github.com/GhostWrk/Agent-Smith/releases/download/v54.3.0/agent-smith_54.3.0_amd64.deb) | `sudo dpkg -i` then `sudo apt -f install` if needed |
+| Feature | **Chat Mode** | **Agent Mode** | **Code Mode** |
+| :--- | :--- | :--- | :--- |
+| **Primary Intent** | Standard conversation, research, and general queries | OS interaction, script running, process control | Autonomous code creation, editing, and bug fixing |
+| **Tools Allowed** | None (Local Memory / Web retrieval optional) | Read-only file tools, terminal execution, system inspection | Full workspace mutation (write, append, patch, execute) |
+| **Workspace Safety** | Absolute (No file mutations possible) | Guarded (Blocked paths, command denylist) | Secure (Full sandbox, snapshot ledger, Revert All) |
+| **Execution Loop** | Simple Stream Response | Stream + single-turn tool calls | Multi-turn phase gates (Explore &rarr; Plan &rarr; Write &rarr; Verify) |
+| **Planning System** | None | None | Durable on-disk `.agentsmith/PLAN.md` |
 
-All releases: **[github.com/GhostWrk/Agent-Smith/releases](https://github.com/GhostWrk/Agent-Smith/releases)**
-
-For macOS and Windows, clone the repo and use the quick start below — the launcher handles platform-specific dependencies.
+> 💡 **User Tip:** You can force a specific route using prefixes! Prepending your message with `code:` forces Code Mode (e.g., `code: add a login page`), while `agent:` forces conversational mode (e.g., `agent: explain what ports are listening`).
 
 ---
 
-## Quick start
+## 🔒 Security & Guardrails
 
-### 1. Load your local models in LM Studio
+Agent Smith is engineered as a local assistant with active brakes, not an unguided autopilot:
 
-Open **LM Studio** and start the local server at `http://localhost:1234`.
+*   **🚫 Path Containment:** The file-handling engine prevents directory traversal attacks. It automatically rejects relative path escapes (`..`) and absolute paths outside the designated workspace.
+*   **⛔ Command Policy Denylist:** The shell executor automatically blocks catastrophic system commands (e.g., `rm -rf /`, `mkfs`, fork bombs, raw scripts piped from curl).
+*   **🧩 Sandboxed Plugins:** Custom extensions execute in an isolated environment under Node.js's permission model when running with `AGENT_SMITH_PLUGIN_SANDBOX=1`. Plugin integrity hashes guarantee that extensions cannot be modified in transit.
+*   **🌐 Network Guard:** All egress connections are strictly monitored, audited, and restricted to verified endpoints via `netGuard.js`.
+*   **🖥️ Hardened Renderer:** Strict Content Security Policies (CSP), blocked frame navigations, and isolated context bridges block untrusted scripts. Sudo password prompts are passed securely via standard input.
 
-Load both models before launching Agent Smith:
+---
 
-1. A chat/code model, such as Gemma or Qwen.
-2. A local embedding model for memory/search.
+## 🚀 Quick Start
 
-Keep LM Studio running while Agent Smith is open. No cloud API key is required.
+### 1. Fire up LM Studio
+
+Open **LM Studio** and verify your local server is running at:
+```http
+http://localhost:1234
+```
+Ensure you have loaded your chosen Chat/Code model (e.g., Qwen-2.5-Coder, Gemma-2-9B). Agent Smith will automatically use its built-in transformer model for embeddings on memory tasks!
 
 ### 2. Launch Agent Smith
 
-**Easiest** — works on Linux, macOS, and Windows:
+Agent Smith features intelligent, cross-platform launchers that verify local package environments and boot native modules cleanly:
 
 ```bash
-# Linux / macOS
+# On Linux & macOS:
 bash run.sh
 ```
 
 ```bat
-:: Windows (or double-click run.cmd)
+:: On Windows:
 run.cmd
 ```
 
-The launcher installs dependencies for **your** platform on first run. If you copied the project from another OS, it detects the mismatch and reinstalls automatically.
-
-**Manual:**
-
+Alternatively, you can start manually via npm:
 ```bash
 npm install
 npm start
 ```
 
-### 3. Point it at your project
+### 3. Choose your workspace
 
-1. Set your workspace with **📍 Here I am**
-2. Turn on **CODE MODE** in the sidebar
-3. Describe the task — watch the timeline as tools run
-4. Review the diff; hit **Revert All** if you want to roll back
-
-**Model tip:** If LM Studio uses just-in-time loading, the model list may look empty at first. Pick your model once in the dropdown — Agent Smith remembers it.
-
-**Memory tip:** If memory or recall says embeddings are unavailable, return to LM Studio and confirm the embedding model is loaded and the local server is still running.
-
-### Provider: LM Studio (local)
-
-Agent Smith talks to one local endpoint — [LM Studio](https://lmstudio.ai/)'s OpenAI-compatible server (default `http://127.0.0.1:1234`). No cloud keys, no telemetry. The v48 Kimi K3 cloud toggle was retired in v50; LM Studio is the only model provider as of v51.2.
+1. Click **📍 Here I am** and select your project's directory.
+2. Toggle **CODE MODE** on the left panel.
+3. Describe the module or bug-fix you want to implement.
+4. Watch the step-by-step progress timeline. Once complete, review the generated diff or hit **Revert All** if you want a clean slate!
 
 ---
 
-## Feature highlights
+## 🛠️ Developer Guide
 
-**Intelligence & tuning**
-- Runtime auto-tune — model-aware context and temperature profiles ([`docs/RUNTIME_PROFILE.md`](docs/RUNTIME_PROFILE.md))
-- Gemma harness — system folding and tool JSON preamble for small-model reliability
-- Smart persistent memory — local embeddings provide recall without cloud services; load the embedding model in LM Studio before using memory features
-- Zero-setup cockpit — Build Mode plans then grinds to green; Hardware Guard shows live RAM/VRAM/GPU
+### Prerequisites
+*   [Node.js](https://nodejs.org/) (v18.x or later)
+*   [LM Studio](https://lmstudio.ai/) (with local API enabled)
 
-**Safety & trust**
-- Change ledger with byte-exact **Revert All**
-- Agent action log — review and undo file writes and deletes
-- `commandPolicy` and `pathPolicy` refuse catastrophic shell and filesystem targets
-
-**Workflow**
-- Live preview panel for web projects
-- Headless `browser_verify` for HTML acceptance checks in Code Mode
-- Durable `.agentsmith/` artifacts for multi-step missions
-- Optional WhatsApp linking and phone QR for remote cockpit access
-
-**Polish**
-- Frameless desktop shell with custom window controls
-- Official Linux desktop entry via `npm run install-desktop`
-- Matrix-inspired UI with a modern card overlay
-
----
-
-## Documentation
-
-| Doc | Purpose |
-|-----|---------|
-| [`SMITH.md`](SMITH.md) | Product doctrine and design law |
-| [`docs/CODE_MODE.md`](docs/CODE_MODE.md) | Code Mode deep dive |
-| [`AGENTS.md`](AGENTS.md) | Repo map for contributors and AI assistants |
-| [`PROTOCOL.md`](PROTOCOL.md) | Protocol and security detail |
-| [`docs/architecture.md`](docs/architecture.md) | System layout |
-| [`docs/PLUGINS.md`](docs/PLUGINS.md) | Plugin development |
-| [`CHANGELOG.md`](CHANGELOG.md) | Release history |
-
----
-
-## For developers
-
-### Build from source
-
+### Build from source & Bundle
 ```bash
 npm install
 npm run build:renderer
 npm start
 ```
 
-### Linux packages
-
-Build on Linux (electron-builder does not cross-compile cleanly from Windows):
-
+### Build installers (Debian / AppImage)
 ```bash
-npm install
-npm run dist              # → AppImage + .deb in release/
-npm run install-desktop   # optional: app-menu launcher + taskbar icon
+npm run dist              # Outputs installers in the release/ directory
+npm run install-desktop   # Creates Linux Desktop entry / application shortcut
 ```
 
-### Verification
-
+### Run Tests & Verification
 ```bash
-npm test
-npm run ship-check
-node scripts/verify-main-ipc.js
-npm run build:renderer
+npm test                          # Runs entire unit test suite
+node scripts/verify-main-ipc.js   # Asserts correct IPC registration patterns
+npm run ship-check                # Full pre-ship lint and format check
 ```
-
-### Project layout
-
-| Path | Role |
-|------|------|
-| `src/code/` | Code Mode engine — turn loop, tools, completion gate |
-| `src/main/` | Electron main process — services and IPC |
-| `src/renderer/` | UI — chat, sidebar, timeline, mode toggles |
-| `src/shared/` | Cross-process helpers — policies, channels, persona |
-| `tests/` | Unit and integration tests |
-| `docs/` | Architecture, harness, and mode documentation |
-
-### Sharing across operating systems
-
-**Do not zip `node_modules`.** Native binaries (`esbuild`, `electron`) are platform-specific. Send source only; recipients run `npm install` on their machine.
 
 ---
 
-## Privacy & sharing installers
+## 📁 Repository Map
 
-Installers (AppImage/.deb) contain **only app code** — no API keys, no chat history, no memory, no accounts. All app data lives in your local user profile (`~/.config/Agent Smith/`), never in the project directory or the packages. Sharing an installer is safe; a recipient gets a clean app and enters their own settings. Just don't share your `~/.config/Agent Smith/` profile folder — that's where your data is.
+```
+├── main.js                 # Electron main bootstrap and OS lifecycle
+├── preload.js              # Hardened ContextBridge preload script
+├── package.json            # Dependencies and platform build config
+├── src/
+│   ├── code/               # Code Mode Engine (turn loop, phase gates, completion gate)
+│   ├── main/               # Electron main services & extracted IPC handlers
+│   ├── renderer/           # User Interface (sidebar, chat timeline, workspace review)
+│   └── shared/             # Shared helpers, command policies, and net-guards
+├── tests/                  # Robust unit, integration, and security tests
+├── docs/                   # Full documentation on Plugins, Profiles, and Code Mode
+└── AGENTS.md               # Onboarding map for AI agents building the codebase
+```
 
 ---
 
-## License
+## 📦 Electron Depot — build assets (auto-downloaded)
 
-MIT — see [`LICENSE`](LICENSE).
+Code Mode packaging (`npm run dist`) needs Electron runtime zips + builder toolsets (~576 MB). To keep this repo small, the depot **archives are not committed** — only their extracted toolset dirs and `.state` markers live in `vendor/`. On first launch the app auto-detects what's missing from your local cache and downloads it (live progress in the sidebar **BUILD ASSETS** section; manifest: `src/shared/electronAssetsManifest.js`).
+
+If you want `vendor/` fully populated locally (offline dev, re-seeding):
+
+```bash
+node scripts/fetch-electron-assets.js                  # all missing archives → ./vendor
+node scripts/fetch-electron-assets.js --only <name>    # one asset
+```
+
+---
+
+## 📜 License
+
+This project is licensed under the [MIT License](LICENSE).
 
 <p align="center">
-  <sub>Agent Smith v54.3.0 · Built for local models, built for builders.</sub>
+  <sub>Agent Smith Reloaded v55.3.0 · Designed for Local Models. Secured for Enterprise Codebases.</sub>
 </p>

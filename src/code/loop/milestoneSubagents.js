@@ -36,7 +36,9 @@ async function runOneMilestone(opts, milestone) {
         session, parentProjectRoot, planAnchor, planArtifacts, earlyStop, qualityMonitor,
         trace, userDataPath, buildExecDeps, execDeps, emit, signal, apiBaseUrl, apiKey,
         pluginToolSchemas, pluginToolNames, streamCompletion, memory, pluginManager,
-        executeTurnLoop, projectContext, mode
+        executeTurnLoop, projectContext, mode,
+        // v54.4: 🧠 THINK — child milestone runs inherit the parent run's thinking state.
+        thinkingEnabled, strictNoThink
     } = opts;
 
     const useWorktree = mode.startsWith('worktree');
@@ -112,6 +114,8 @@ async function runOneMilestone(opts, milestone) {
             streamCompletion,
             memory,
             pluginManager,
+            thinkingEnabled,
+            strictNoThink,
             projectRoot: parentProjectRoot
         });
     } finally {

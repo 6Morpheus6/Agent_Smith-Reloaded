@@ -2132,6 +2132,8 @@ body.code-run-visible #empty-state {
     padding: 6px 9px; background: var(--accent-faint);
     border: 1px solid var(--hairline); border-radius: var(--radius-sm);
 }
+/* v55.3: error state for the BUILD ASSETS status line (download failures). */
+.chip-note--error { color: #ff8a8a; background: color-mix(in srgb, var(--danger-color) 12%, transparent); border-color: color-mix(in srgb, var(--danger-color) 45%, transparent); }
 
 /* --- label+input field group --- */
 .field label { margin-bottom: 6px; }

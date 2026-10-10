@@ -14,8 +14,15 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
         spawn, projectContext, editEngine, changeLedger,
         grepProject, globFiles, relPathFromRoot, userDataPath,
         getLmsUrl, getMainWindow, pushEvent, pluginManager, memoryManager,
-        previewRunner, actionLog, downloadRegistry, invalidateRepoMap
+        previewRunner, actionLog, downloadRegistry, invalidateRepoMap, electronDepot
     } = deps;
+
+    // v54.8 — Electron Depot: every Code Mode shell (foreground + background) runs with the
+    // depot's env so `npm install` / `electron-builder` in any project resolves Electron from
+    // <userData>/electron-cache instead of GitHub. ensureReady() is idempotent and fast once
+    // seeded; it also no-ops cleanly when vendor/ was stripped (old download behavior).
+    const depotEnv = () => { try { return electronDepot ? electronDepot.envFor(process.env) : process.env; } catch (_) { return process.env; } };
+    const depotReady = () => { try { return electronDepot ? electronDepot.ensureReady() : Promise.resolve(); } catch (_) { return Promise.resolve(); } };
 
     // Cross-session vector memory adapter for Code Mode (best-effort; degrades silently
     // when embeddings/Ollama are unavailable).
@@ -41,10 +48,12 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
 
     function spawnShell(command, cwd) {
         const cfg = projectContext.getShellConfig();
+        // v54.8 — depot-aware env (electron_config_cache / XDG_CACHE_HOME → <userData>/electron-cache).
+        const env = depotEnv();
         if (projectContext.isWindows()) {
-            return spawn(cfg.shell, [cfg.flag, cfg.commandFlag, command], { cwd, shell: false });
+            return spawn(cfg.shell, [cfg.flag, cfg.commandFlag, command], { cwd, shell: false, env });
         }
-        return spawn(cfg.shell, [cfg.flag, command], { cwd });
+        return spawn(cfg.shell, [cfg.flag, command], { cwd, env });
     }
 
     function buildExecDeps(sessionId) {
@@ -90,6 +99,10 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             relPathFromRoot,
             fireHook,
             invokePluginTool,
+            // v55.2 — SUDO OVERRIDE: the user's password for THIS run (renderer reads it from
+            // the override field at run/resume/approve time). In-memory only — never written
+            // to a CodeSession on disk. The executor injects it into `sudo` commands.
+            sudoPassword: activeRun?.sudoPassword || '',
             showPreview: previewRunner
                 ? (args) => previewRunner.show(args)
                 : null,
@@ -106,8 +119,14 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             // nesting one flag's report inside another's branch. The legacy `error` string is
             // kept so the loop's ok-check and TEST-BEFORE-DONE tracking keep working, but it
             // now names WHICH fact failed (exit code N / timed out / run stopped).
-            runForegroundCommand: (command, cwd) => new Promise((resolve) => {
-                const FG_TIMEOUT_MS = 300000;
+            runForegroundCommand: (command, cwd, opts = {}) => new Promise(async (resolve) => {
+                // v54.8: wait for the depot to be seeded before spawning so an Electron
+                // install/build in this command hits <userData>/electron-cache, not GitHub.
+                try { await depotReady(); } catch (_) {}
+                // v54.5: per-call timeout from longBuildPolicy (long builds get a build-sized
+                // window; everything else keeps the 5-minute default). onHeartbeat lets an
+                // output-silent builder keep the run watchdog alive via periodic ticks.
+                const FG_TIMEOUT_MS = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 300000;
                 const cfg = projectContext.getShellConfig();
                 // Bind to the active run's abort signal so stopping the run also kills an
                 // in-flight command instead of waiting out its timeout.
@@ -115,8 +134,8 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
                 let child;
                 try {
                     child = projectContext.isWindows()
-                        ? spawn(cfg.shell, [cfg.flag, cfg.commandFlag, command], { cwd })
-                        : spawn(cfg.shell, [cfg.flag, command], { cwd });
+                        ? spawn(cfg.shell, [cfg.flag, cfg.commandFlag, command], { cwd, env: depotEnv() })
+                        : spawn(cfg.shell, [cfg.flag, command], { cwd, env: depotEnv() });
                 } catch (e) {
                     resolve({ error: `Could not run command: ${e.message}` });
                     return;
@@ -124,6 +143,10 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
                 let stdout = '';
                 let stderr = '';
                 let timedOut = false;
+                const beatTimer = (typeof opts.onHeartbeat === 'function')
+                    ? setInterval(() => { try { opts.onHeartbeat(command); } catch (_) {} }, 30000)
+                    : null;
+                if (beatTimer && typeof beatTimer.unref === 'function') beatTimer.unref();
                 const timer = setTimeout(() => {
                     timedOut = true;
                     try { child.kill('SIGTERM'); } catch (_) {}
@@ -135,6 +158,7 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
                 child.stderr?.on('data', d => { stderr += String(d); });
                 const cleanup = () => {
                     clearTimeout(timer);
+                    if (beatTimer) clearInterval(beatTimer);
                     if (signal && !signal.aborted) signal.removeEventListener('abort', onAbort);
                 };
                 child.on('error', (e) => { cleanup(); resolve({ error: `Could not run command: ${e.message}` }); });
@@ -150,6 +174,12 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
                         else if (signal && signal.aborted) parts.push('run stopped');
                         else parts.push(`exit code ${code}`);
                         out.error = `Command failed (${parts.join(', ')}): ${command}`;
+                        // v54.5: a timed-out long build gets explicit recovery guidance — the
+                        // old behaviour (bare timeout error) made models retry blindly and loop.
+                        if (timedOut) {
+                            const { isLongBuildCommand, longBuildGuidance } = require('../../shared/longBuildPolicy.js');
+                            if (isLongBuildCommand(command)) out.remediation = longBuildGuidance(command);
+                        }
                     }
                     resolve(out);
                 });
@@ -263,7 +293,8 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             return { error: 'A code run is already active. Stop it first.' };
         }
         const controller = new AbortController();
-        activeRun = { status: 'running', controller, sessionId: resumeSession?.id || null };
+        // v55.2 — SUDO OVERRIDE: per-run, in-memory only (never persisted to a CodeSession).
+        activeRun = { status: 'running', controller, sessionId: resumeSession?.id || null, sudoPassword: opts.sudoPassword || '' };
         const pluginToolSchemas = getPluginToolSchemas();
 
         // v50 unified harness: a run works with or without a selected project folder.
@@ -358,7 +389,12 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             isolatedRun: !!opts?.isolatedRun,
             parallelMilestones: !!opts?.parallelMilestones,
             milestoneWorktrees: !!opts?.milestoneWorktrees,
-            milestoneConcurrent: !!opts?.milestoneConcurrent
+            milestoneConcurrent: !!opts?.milestoneConcurrent,
+            // v54.4: 🧠 THINK — per-run thinking state from the renderer (default ON).
+            thinkingEnabled: opts?.thinkingEnabled !== false,
+            strictNoThink: !!opts?.strictNoThink,
+            // v55.2: SUDO OVERRIDE — current value of the override field for THIS run.
+            sudoPassword: typeof opts?.sudoPassword === 'string' ? opts.sudoPassword : ''
         });
     });
 
@@ -398,7 +434,12 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             apiBaseUrl,
             apiKey: opts?.apiKey || null,
             requirePlanApproval: false,
-            continueAfterApproval: session.status === 'awaiting_approval' && !!opts?.continueAfterApproval
+            continueAfterApproval: session.status === 'awaiting_approval' && !!opts?.continueAfterApproval,
+            // v54.4: 🧠 THINK — resume honours the CURRENT toggle state (undefined → ON).
+            thinkingEnabled: opts?.thinkingEnabled !== false,
+            strictNoThink: !!opts?.strictNoThink,
+            // v55.2: SUDO OVERRIDE — current value of the override field for THIS run.
+            sudoPassword: typeof opts?.sudoPassword === 'string' ? opts.sudoPassword : ''
         }, session);
     });
 
@@ -435,7 +476,12 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             apiKey: opts?.apiKey || null,
             requirePlanApproval: false,
             continueAfterApproval: true,
-            grindMode: opts?.grindMode !== false
+            grindMode: opts?.grindMode !== false,
+            // v54.4: 🧠 THINK — the approved run continues with the CURRENT state.
+            thinkingEnabled: opts?.thinkingEnabled !== false,
+            strictNoThink: !!opts?.strictNoThink,
+            // v55.2: SUDO OVERRIDE — current value of the override field for THIS run.
+            sudoPassword: typeof opts?.sudoPassword === 'string' ? opts.sudoPassword : ''
         }, session);
     });
 

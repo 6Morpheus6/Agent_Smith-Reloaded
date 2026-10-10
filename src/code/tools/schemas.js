@@ -101,12 +101,13 @@ const CODE_TOOLS = [
         type: 'function',
         function: {
             name: 'run_command',
-            description: 'Run a shell command in the project root.',
+            description: 'Run a shell command in the project root. Long builds (electron-builder, npm run dist, pyinstaller) may take far longer than the default 5-minute timeout: pass timeout_ms (milliseconds), or better, set is_background:true and poll with read_process_log.',
             parameters: {
                 type: 'object',
                 properties: {
                     command: { type: 'string' },
-                    is_background: { type: 'boolean', description: 'Run in background' }
+                    is_background: { type: 'boolean', description: 'Run in background' },
+                    timeout_ms: { type: 'number', description: 'Max milliseconds to wait (long builds/packaging; default 300000)' }
                 },
                 required: ['command']
             }

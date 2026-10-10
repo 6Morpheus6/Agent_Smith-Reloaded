@@ -11,6 +11,7 @@
 'use strict';
 
 const { classifyModel } = require('./modelClassifier.js');
+const { minCtx } = require('./ctxGate.js');
 
 const CTX_STEP = 1024;
 const CTX_MIN = 2048;
@@ -108,6 +109,20 @@ function buildRuntimeProfile(opts = {}) {
     codeTemperature = clamp(codeTemperature, 0.1, 0.35);
     maxSteps = clamp(maxSteps, 5, 100);
     maxTurns = clamp(maxTurns, 20, 80);
+
+    // v55.9.1: the app-wide minimum (ctxGate.minCtx, 32000) is a HARD floor for anything
+    // Agent Smith will actually run — below it multi-turn agent work loses the plot and the
+    // send gate blocks anyway. A profile that targets less than the floor would make
+    // auto-tune / model-swap reload LM Studio at a window the app can't use, so floor the
+    // computed value here (the single place every ctx target flows through). Applied LAST:
+    // the VRAM-tier branches above may re-cap numCtx for low-VRAM hardware, and none of
+    // those caps may push the profile below the minimum. When hardware genuinely cannot
+    // hold 32K, the main-process loader's fallback ladder degrades gracefully and reports it.
+    const ctxFloor = minCtx();
+    if (numCtx < ctxFloor) {
+        numCtx = Math.min(ctxFloor, CTX_MAX);
+        warnings.push(`Context floored at ${ctxFloor} — Agent Smith's minimum for any model.`);
+    }
 
     const vramGb = opts.telemetry?.memory?.total
         ? Math.round(opts.telemetry.memory.total / 1024)

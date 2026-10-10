@@ -13,7 +13,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { syntaxCheckFile } = require('../../shared/verificationHarness.js');
 const { detectContentIssues } = require('../governor/completionGate.js');
-const { assessCommand, blockedResult } = require('../../shared/commandPolicy.js');
+const { assessCommand, blockedResult, injectSudoPassword } = require('../../shared/commandPolicy.js');
 const { assessPathMutation, blockedPathResult } = require('../../shared/pathPolicy.js');
 const webTools = require('../../shared/webTools.js');
 const { advanceStep } = require('../plan/codePlan.js');
@@ -377,13 +377,24 @@ async function executeTool(name, args, deps) {
         }
         case 'run_command': {
             const cwd = projectContext.getRoot();
-            const cmd = a.command;
+            // v55.2 — SUDO OVERRIDE: when the user supplied a password, inject it into every
+            // `sudo` in the command so elevated commands run non-interactively. The policy
+            // screen below then sees the injected form (leading-sudo → authorized; layer 1
+            // catastrophic rules still apply). Without a password the command runs as-is and
+            // sudo simply fails at its prompt — the policy never blocks on "no password".
+            const cmd = injectSudoPassword(a.command, deps.sudoPassword || '');
             const verdict = assessCommand(cmd, { projectRoot: projectContext.projectRoot || cwd, cwd });
             if (!verdict.allowed) return blockedResult(cmd, verdict.reason);
             if (a.is_background) {
                 return deps.runBackgroundCommand(cmd, cwd, sessionId);
             }
-            return deps.runForegroundCommand(cmd, cwd);
+            // v54.5: pass the per-call timeout + heartbeat sink down to the shell runner so a
+            // recognized long build survives and keeps the run watchdog fed while it runs.
+            const { foregroundTimeoutFor } = require('../../shared/longBuildPolicy.js');
+            return deps.runForegroundCommand(cmd, cwd, {
+                timeoutMs: foregroundTimeoutFor('run_command', a),
+                onHeartbeat: deps.onToolHeartbeat
+            });
         }
         case 'list_project': {
             const tree = await projectContext.listProjectTree();

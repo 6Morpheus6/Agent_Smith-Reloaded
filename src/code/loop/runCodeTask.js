@@ -42,6 +42,19 @@ async function executeTurnLoop(opts) {
         ? buildExecDeps(sessionId)
         : Object.assign({}, execDepsIn || {}, { sessionId });
 
+    // v54.5 — durable progress ledger: on-disk record of every tool outcome for THIS goal.
+    // Restored from session state (resume) or loaded from disk (a fresh run re-issuing the
+    // same task after a crash), so the model always sees what has already been done and
+    // continues on-track instead of redoing finished steps.
+    const { ProgressLedger } = require('../context/progressLedger.js');
+    let ledger = null;
+    try {
+        ledger = new ProgressLedger({ projectRoot: session.projectRoot, goal: session.goal });
+        if (session.progressLedgerState) ledger.restore(session.progressLedgerState);
+        else ledger.loadFromDisk();
+        if (planAnchor && planAnchor.setLedger) planAnchor.setLedger(ledger);
+    } catch (e) { /* ledger is best-effort */ }
+
     // Watchdog: emit liveness heartbeats and turn an async stall (silent model, an
     // unbounded await) into a clean abort + error instead of an invisible freeze.
     // Cannot interrupt synchronous blocks — those are bounded at their source.
@@ -69,6 +82,20 @@ async function executeTurnLoop(opts) {
         ev.run_id = session.runId || sessionId;
         ev.sessionId = sessionId;
         emit(ev);
+    };
+
+    // v54.5: a foreground command that produces no output for minutes (electron-builder is
+    // famously quiet between phases) used to trip the inactivity guard and abort healthy
+    // packaging runs. The shell runner ticks this sink every 30 s while any command lives.
+    execDeps.onToolHeartbeat = (command) => {
+        watchdog.touch();
+        emit({
+            type: 'tool_heartbeat',
+            run_id: session.runId || sessionId,
+            sessionId,
+            name: 'run_command',
+            detail: String(command || '').slice(0, 120)
+        });
     };
 
     let finalSummary = '';
@@ -102,14 +129,19 @@ async function executeTurnLoop(opts) {
             onCheckpoint: () => {
                 session.planAnchorState = planAnchor.serialize();
                 session.planArtifactsState = planArtifacts.serialize();
+                if (ledger) session.progressLedgerState = ledger.serialize();
                 CodeSession.saveDebounced(userDataPath, session);
             },
             pluginToolNames: pluginToolNames || session.pluginToolNames,
             pluginToolSchemas: pluginToolSchemas || [],
-            streamCompletion
+            streamCompletion,
+            // v54.4: 🧠 THINK — per-run thinking state (undefined → ON).
+            thinkingEnabled: opts.thinkingEnabled,
+            strictNoThink: opts.strictNoThink
         });
 
         if (session.status === 'running') session.status = 'unverified';
+        if (ledger) session.progressLedgerState = ledger.serialize();
         session.finishedAt = Date.now();
         if (session.isolatedRun && session.worktreePath && opts.projectRoot) {
             try { cleanupWorktree(session.parentProjectRoot || opts.projectRoot, sessionId); } catch (e) { /* non-fatal */ }
@@ -167,6 +199,7 @@ async function executeTurnLoop(opts) {
 
     session.planAnchorState = planAnchor.serialize();
     session.planArtifactsState = planArtifacts.serialize();
+    if (ledger) session.progressLedgerState = ledger.serialize();
 
     if (memory && typeof memory.remember === 'function' && (session.filesTouched || []).length) {
         try {
@@ -397,7 +430,10 @@ async function runCodeTask(opts) {
             signal,
             execDeps,
             trace,
-            streamCompletion: opts.streamCompletion
+            streamCompletion: opts.streamCompletion,
+            // v54.4: 🧠 THINK — planning turns honour the run's thinking state.
+            thinkingEnabled: opts.thinkingEnabled,
+            strictNoThink: opts.strictNoThink
         });
         session.planAnchorState = planAnchor.serialize();
         await CodeSession.save(userDataPath, session);
@@ -496,7 +532,10 @@ async function runCodeTask(opts) {
         pluginToolNames: opts.pluginToolNames,
         streamCompletion: opts.streamCompletion,
         memory: opts.memory,
-        pluginManager: opts.pluginManager
+        pluginManager: opts.pluginManager,
+        // v54.4: 🧠 THINK — per-run thinking state (undefined → ON).
+        thinkingEnabled: opts.thinkingEnabled,
+        strictNoThink: opts.strictNoThink
     });
 }
 

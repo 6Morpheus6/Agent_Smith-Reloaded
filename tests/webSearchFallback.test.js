@@ -151,8 +151,18 @@ test('synthesizeAnswer: builds a first-person answer with linked sources', () =>
     assert.match(out.markdown, /Here's what I found on \*\*"what happened at the 2026 World Cup final"\*\*/);
     assert.match(out.markdown, /\[FIFA\]\(https:\/\/www\.fifa\.com\/en\/tournaments\/mens\/worldcup\/2026\/final\)/);
     assert.match(out.markdown, /ESPN/);
-    // Honest attribution: the user must know this was compiled from the results.
-    assert.match(out.markdown, /Compiled from the search results above/);
+});
+
+test('v55.8: no "Compiled from the search results above… verbatim" regurgitation footer', () => {
+    // The old footer told the user the answer was a forced dump of raw findings — it made the
+    // fallback read as an apology, not Smith's synthesis. It must be gone for BOTH shapes.
+    const compact = fb.synthesizeAnswer('q1', COMPACT_RESULT);
+    assert.ok(compact && compact.markdown);
+    assert.doesNotMatch(compact.markdown, /Compiled from the search results above/);
+    assert.doesNotMatch(compact.markdown, /verbatim/i);
+    const deep = fb.synthesizeAnswer('q2', DEEP_REPORT);
+    assert.ok(deep && deep.markdown);
+    assert.doesNotMatch(deep.markdown, /Compiled from the search results above/);
 });
 
 test('synthesizeAnswer: caps at 6 entries', () => {

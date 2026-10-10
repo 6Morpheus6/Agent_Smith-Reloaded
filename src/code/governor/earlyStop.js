@@ -46,12 +46,16 @@ class EarlyStopDetector {
      * Stagnation guard tied to actual deliverables. Call once per turn with the number
      * of distinct files written so far (filesTouched). Resets when that grows OR when
      * opts.hadEdit is true (patch/append to an existing file still counts as progress).
+     * v54.5: opts.buildProgress (a long build/package command completed — ok or not) also
+     * resets it. Packaging tasks legitimately run for many turns without touching project
+     * SOURCE files (electron-builder churns in dist/release output dirs); the old counter
+     * treated a 12-turn packaging stretch as "no progress" and killed exactly those runs.
      */
     onProgress(fileCount, opts = {}) {
         if (fileCount > this.lastFileCount) {
             this.lastFileCount = fileCount;
             this.noWriteTurns = 0;
-        } else if (opts.hadEdit) {
+        } else if (opts.hadEdit || opts.buildProgress) {
             this.noWriteTurns = 0;
         } else {
             this.noWriteTurns++;

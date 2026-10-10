@@ -83,6 +83,68 @@ test('ensureModel is a no-op when context and parallel already match', async () 
     assert.equal(calls.length, 0);
 });
 
+test('v55.9.2 — ensureModel respects a loaded window LARGER than requested (no downgrade reload)', async () => {
+    // The reported bug: the user loads a model at 131072 in LM Studio; Agent Smith's auto-tune
+    // floor / stale slider requests 32000. The old code saw 131072 !== 32000 and force-reloaded
+    // DOWN to 32000 — so "change ctx above 32K" always showed up as 32000 in the app. A loaded
+    // window at or above the request satisfies it: no reload, the larger window is reported.
+    const calls = [];
+    const manager = createLmStudioManager({
+        requestJson: async () => modelPayload(131072, 4), // user's own LM Studio setting
+        execFile: async (...args) => calls.push(args)
+    });
+    const result = await manager.ensureModel({
+        apiBaseUrl: 'http://127.0.0.1:1234',
+        model: 'google/gemma-4-e4b',
+        contextLength: 32000 // auto-tune floor / slider value — smaller than what's loaded
+    });
+    assert.equal(result.reloaded, false);
+    assert.equal(calls.length, 0, 'no unload/load issued for a window that already satisfies the request');
+    assert.equal(result.loadedContext, 131072, 'the user\'s larger loaded window is reported as-is');
+});
+
+test('v55.9.2 — ensureModel still GROWS a smaller loaded window to the requested context', async () => {
+    // The inverse direction must keep working: model loaded at 8192, request 65536 → reload up.
+    const calls = [];
+    let statusReads = 0;
+    const manager = createLmStudioManager({
+        requestJson: async () => {
+            statusReads++;
+            return modelPayload(statusReads === 1 ? 8192 : 65536, statusReads === 1 ? 4 : 1);
+        },
+        execFile: async (file, args) => { calls.push(args); return { stdout: '', stderr: '' }; },
+        lmsPath: 'lms'
+    });
+    const result = await manager.ensureModel({
+        apiBaseUrl: 'http://127.0.0.1:1234',
+        model: 'google/gemma-4-e4b',
+        contextLength: 65536
+    });
+    assert.equal(result.reloaded, true);
+    assert.equal(result.loadedContext, 65536);
+});
+
+test('v55.9.2 — ensureModel still reloads a loaded window BELOW the request (min-ctx path)', async () => {
+    // v55.9.1 behavior preserved: model loaded at 16384 (< 32000 floor) → auto-reload up to it.
+    const calls = [];
+    let statusReads = 0;
+    const manager = createLmStudioManager({
+        requestJson: async () => {
+            statusReads++;
+            return modelPayload(statusReads === 1 ? 16384 : 32000, statusReads === 1 ? 4 : 1);
+        },
+        execFile: async (file, args) => { calls.push(args); return { stdout: '', stderr: '' }; },
+        lmsPath: 'lms'
+    });
+    const result = await manager.ensureModel({
+        apiBaseUrl: 'http://127.0.0.1:1234',
+        model: 'google/gemma-4-e4b',
+        contextLength: 32000
+    });
+    assert.equal(result.reloaded, true);
+    assert.equal(result.loadedContext, 32000);
+});
+
 test('ensureModel reloads with safe fixed CLI arguments', async () => {
     const calls = [];
     let statusReads = 0;

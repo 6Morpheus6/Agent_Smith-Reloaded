@@ -1,6 +1,15 @@
 # Dependencies
 node_modules/
 
+# Piper voice models — downloaded on demand at runtime (github.com/... only ships
+# the empty resources/piper/voices folder + the piper engines, NOT the ~60MB models).
+resources/piper/voices/*.onnx
+resources/piper/voices/*.onnx.json
+resources/piper/voices/*.onnx.json.part
+resources/piper/voices/*.onnx.part
+resources/piper/voices/.writetest-*
+!resources/piper/voices/.gitkeep
+
 # Build output
 dist/
 *.AppImage

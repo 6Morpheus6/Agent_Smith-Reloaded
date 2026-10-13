@@ -40,7 +40,9 @@ const WEB_RECEIVE_CHANNELS = [
     // broadcasts it over SSE; this only unblocks the client-side listener).
     'imagegen-event',
     // v55.3: Electron Depot auto-provisioning progress (same SSE broadcast path).
-    'electron-assets-event'
+    'electron-assets-event',
+    // v57: Piper voice download progress (tts-ensure-voice).
+    'tts-event'
 ];
 
 function createWebApiPolyfill() {
@@ -211,6 +213,29 @@ const memoryCountBadge = document.getElementById('memory-count-badge');
 const clearBtn = document.getElementById('clear-btn');
 const localTtsToggle = document.getElementById('local-tts-toggle');
 const testAudioBtn = document.getElementById('test-audio-btn');
+// v57: language dropdown in the TTS section (labels mirror VOICES in src/main/lifecycle/tts.js).
+const ttsLangSelect = document.getElementById('tts-lang-select');
+const ttsLangStatus = document.getElementById('tts-lang-status');
+const TTS_LANG_KEY = 'agentsmith_tts_lang';
+
+// v57: currently selected voice language (persisted; defaults to English).
+function isTtsLangOption(value) {
+    return !!(ttsLangSelect && Array.prototype.some.call(ttsLangSelect.options, (o) => o.value === value));
+}
+function getTtsLang() {
+    const saved = (localStorage.getItem(TTS_LANG_KEY) || '').toLowerCase();
+    if (isTtsLangOption(saved)) return saved;
+    // No valid saved choice yet — use whatever the dropdown currently shows
+    // (BUGFIX: previously this only ever read localStorage, so picking a language
+    // in the dropdown never took effect — everything stayed on English).
+    if (ttsLangSelect && isTtsLangOption(ttsLangSelect.value)) return ttsLangSelect.value;
+    return 'en';
+}
+function setTtsLangStatus(text) {
+    if (!ttsLangStatus) return;
+    ttsLangStatus.textContent = text || '';
+    ttsLangStatus.style.display = text ? '' : 'none';
+}
 
 // v51.7: persist the image-gen toggle to the main process (source of truth for state.json).
 if (imageGenToggle) {
@@ -234,7 +259,7 @@ async function getTtsStatus() {
     if (ttsStatusCache) return ttsStatusCache;
     let res;
     try {
-        res = await window.api.invoke('tts-status');
+        res = await window.api.invoke('tts-status', { lang: getTtsLang() });
     } catch (err) {
         res = { ok: false, reason: `status probe failed: ${err.message}` };
     }
@@ -255,6 +280,27 @@ function ttsBrokenNote(reason) {
     addMessage('system', `TTS unavailable — ${reason}. SPEAK RESPONSES is on but no audio engine could be started.`);
 }
 
+// v57: check the selected language's model — download it from HuggingFace if missing.
+// Called by the TEST button, on toggle-on, on language change, and before speaking.
+async function ensureTtsVoice(lang, { announce = true } = {}) {
+    if (!window.api || typeof window.api.invoke !== 'function') return { ok: false, error: 'browser mode' };
+    if (announce) setTtsLangStatus('Downloading…');
+    let res;
+    try {
+        res = await window.api.invoke('tts-ensure-voice', { lang });
+    } catch (err) {
+        res = { ok: false, error: (err && err.message) || String(err) };
+    }
+    if (res && res.ok) {
+        setTtsLangStatus(res.downloaded ? 'Ready ✓ (new)' : 'Ready ✓');
+        return res;
+    }
+    const error = (res && (res.error || res.reason)) || 'voice download failed';
+    setTtsLangStatus('Failed');
+    ttsBrokenNote(error);
+    return { ok: false, error };
+}
+
 async function localSpeak(text) {
     const plain = String(text || '').trim();
     if (!plain) return;
@@ -264,7 +310,7 @@ async function localSpeak(text) {
         try {
             const status = await getTtsStatus();
             if (!status.ok) { ttsBrokenNote(status.reason || 'unknown reason'); return; }
-            const res = await window.api.invoke('tts-speak', plain);
+            const res = await window.api.invoke('tts-speak', { text: plain, lang: getTtsLang() });
             if (res && res.error) ttsBrokenNote(res.error); // one-time note, then stay quiet
         } catch (err) {
             ttsBrokenNote(err.message || String(err));
@@ -285,6 +331,33 @@ async function localSpeak(text) {
 if (window.api && typeof window.api.invoke === 'function') {
     getTtsStatus().catch(() => {});
 }
+
+// --- v57: language dropdown + on-demand model download -----------------------
+if (ttsLangSelect) {
+    ttsLangSelect.value = getTtsLang(); // restore saved choice (falls back to 'en')
+    ttsLangSelect.addEventListener('change', () => {
+        // Save the SELECT's live value (not getTtsLang(), which reads storage).
+        try { localStorage.setItem(TTS_LANG_KEY, ttsLangSelect.value); } catch (_) { /* private mode */ }
+        ttsStatusCache = null; // voice/lang changed — re-probe status on next use
+        ensureTtsVoice(getTtsLang()).catch(() => {}); // download the new model if missing
+    });
+}
+if (localTtsToggle) {
+    localTtsToggle.addEventListener('change', () => {
+        if (!localTtsToggle.checked) return;
+        ensureTtsVoice(getTtsLang()).catch(() => {}); // "TTS activated" → guarantee the model
+    });
+}
+try {
+    if (window.api && typeof window.api.on === 'function') {
+        window.api.on('tts-event', (ev) => {
+            if (!ev || ev.phase !== 'progress') return;
+            setTtsLangStatus(ev.pct != null
+                ? `Downloading ${ev.voice}… ${ev.pct}%`
+                : `Downloading ${ev.voice}…`);
+        });
+    }
+} catch (_) { /* channel not bridgeable in this mode */ }
 const netrunnerToggle = document.getElementById('netrunner-toggle');
 const exportBtn = document.getElementById('export-btn');
 const importBtn = document.getElementById('import-btn');
@@ -1239,10 +1312,19 @@ if (testAudioBtn) {
     testAudioBtn.addEventListener('click', async () => {
         try {
             if (window.api && typeof window.api.invoke === 'function') {
+                const ensured = await ensureTtsVoice(getTtsLang()); // check + download model if missing
+                if (!ensured.ok) return;
                 const status = await getTtsStatus();
                 if (!status.ok) { ttsBrokenNote(status.reason || 'unknown reason'); return; }
-                const res = await window.api.invoke('tts-speak', 'Agent Smith audio is operational.');
+                // v57: localized test sentence — main picks VOICES[lang].test.
+                const res = await window.api.invoke('tts-speak', { test: true, lang: getTtsLang() });
                 if (res && res.error) ttsBrokenNote(res.error);
+                else if (res && res.skipped) {
+                    // Main process too old to understand {test:true} (started before the
+                    // localized TEST sentence shipped) — say so instead of faking success.
+                    setTtsLangStatus('Restart app');
+                    ttsBrokenNote('the running app process is older than this UI and ignored the TEST request — restart Agent Smith in Pinokio, then reload the page');
+                }
                 else showToast(`🔊 TTS test — Piper (${status.voice})`);
             } else {
                 localSpeak('Agent Smith audio is operational.');

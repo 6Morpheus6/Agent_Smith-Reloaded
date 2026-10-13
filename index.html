@@ -277,7 +277,23 @@
 
                     <div class="sb-divider"></div>
                     <div class="toggle-list">
-                        <div class="toggle-row"><label class="toggle-label" title="v55.6: Piper TTS (bundled en_US-joe-medium voice) — reads each model response aloud via the main process"><input type="checkbox" id="local-tts-toggle"> SPEAK RESPONSES</label><button id="test-audio-btn" class="test-btn" title="Test speech output">TEST</button></div>
+                        <div class="toggle-row"><label class="toggle-label" title="v57: Piper TTS — reads each model response aloud via the main process (voice model auto-downloads on first use)"><input type="checkbox" id="local-tts-toggle"> SPEAK RESPONSES</label><button id="test-audio-btn" class="test-btn" title="Test speech output">TEST</button></div>
+                        <!-- v57: TTS voice language — model downloads automatically from HuggingFace when selected -->
+                        <div class="toggle-row" title="Piper voice language (male voices, medium quality). The model is downloaded automatically on first use.">
+                            <label class="toggle-label" for="tts-lang-select">VOICE LANGUAGE</label>
+                            <span class="tts-lang-wrap">
+                                <select id="tts-lang-select" aria-label="TTS voice language">
+                                    <option value="en">English (joe · medium)</option>
+                                    <option value="de">Deutsch (thorsten · medium)</option>
+                                    <option value="fr">Français (tom · medium)</option>
+                                    <option value="es">Español (davefx · medium)</option>
+                                    <option value="it">Italiano (riccardo · x_low)</option>
+                                    <option value="pl">Polski (darkman · medium)</option>
+                                    <option value="ru">Русский (denis · medium)</option>
+                                </select>
+                                <span id="tts-lang-status" class="chip-note" style="display:none;"></span>
+                            </span>
+                        </div>
                         <div class="toggle-row"><label class="toggle-label" title="Allow show_preview screenshot of screen/window (requires source picker)"><input type="checkbox" id="preview-desktop-toggle"> DESKTOP PREVIEW</label></div>
                         <!-- v54.4: strict mode also sends reasoning_effort:'none' (LM Studio's own
                              request-level control). OFF by default: models WITHOUT a reasoning

@@ -50,7 +50,8 @@ const INVOKE_CHANNELS = [
     // v55.3: Electron Depot auto-provisioning (detect + download missing build assets).
     'electron-assets-status', 'electron-assets-retry',
     // v55.5: Piper TTS — SPEAK RESPONSES engine (status probe + speak request).
-    'tts-status', 'tts-speak',
+    // v57: tts-ensure-voice = check + auto-download the selected language model.
+    'tts-status', 'tts-speak', 'tts-ensure-voice',
     'ghosttrace-append'
 ];
 
@@ -63,7 +64,9 @@ const RECEIVE_CHANNELS = [
     'resource-update', 'plugin-ui-event',
     'code-event', 'preview-event', 'imagegen-event',
     // v55.3: Electron Depot auto-provisioning progress (detect/download/verify).
-    'electron-assets-event'
+    'electron-assets-event',
+    // v57: Piper voice download progress (tts-ensure-voice / first speak).
+    'tts-event'
 ];
 
 const api = { INVOKE_CHANNELS, SEND_CHANNELS, RECEIVE_CHANNELS };

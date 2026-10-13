@@ -78,7 +78,10 @@ function makeFakeRuntime({ sleepSec = 0 } = {}) {
     fs.mkdirSync(dir);
     makeFakePiper(dir, { sleepSec });
     fs.mkdirSync(path.join(dir, 'voices'), { recursive: true });
+    // Model + config JSON: a voice only counts as installed when BOTH exist
+    // (piper needs the .onnx.json; downloads always fetch the pair).
     fs.writeFileSync(path.join(dir, 'voices', `${tts.VOICE_NAME}.onnx`), 'fake-model');
+    fs.writeFileSync(path.join(dir, 'voices', `${tts.VOICE_NAME}.onnx.json`), '{"fake":true}');
     return { root, dir };
 }
 
@@ -321,7 +324,7 @@ test('tts-status reports a reason when the runtime is missing', async () => {
     }
 });
 
-test('tts-speak synthesizes + plays and cleans up its temp wav', async () => {
+test('tts-speak synthesizes + plays and cleans up its temp wav', { skip: process.platform === 'win32' ? 'fake piper/player are #!/bin/sh scripts — not executable on Windows' : false }, async () => {
     const { root } = makeFakeRuntime();
     const players = fs.mkdtempSync(path.join(os.tmpdir(), 'xk-tts-ipcs-'));
     try {
@@ -366,7 +369,7 @@ test('tts-speak returns an error object (never throws) when the runtime is missi
     }
 });
 
-test('a newer tts-speak supersedes an in-flight one (newest response wins)', async () => {
+test('a newer tts-speak supersedes an in-flight one (newest response wins)', { skip: process.platform === 'win32' ? 'fake piper/player are #!/bin/sh scripts — not executable on Windows' : false }, async () => {
     const { root } = makeFakeRuntime({ sleepSec: 0.6 }); // slow synthesis → overlap window
     const players = fs.mkdtempSync(path.join(os.tmpdir(), 'xk-tts-ipcx-'));
     try {

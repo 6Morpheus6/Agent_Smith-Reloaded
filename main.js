@@ -210,7 +210,8 @@ catch (e) { console.error('[startup] WhatsApp IPC registration skipped:', (e && 
 
 // v55.5: Piper TTS — the SPEAK RESPONSES toggle's real engine (main process).
 const registerTtsIpc = require('./src/main/lifecycle/tts.js');
-try { registerTtsIpc(ipcMain, {}); }
+// v57: pushEvent carries voice-download progress ('tts-event') to desktop + web UIs.
+try { registerTtsIpc(ipcMain, { pushEvent }); }
 catch (e) { console.error('[startup] TTS IPC registration skipped:', (e && e.message) || e); }
 
 // IPC domains (open-file-dialog, auth, history, agent, edit, project, plan,
@@ -1047,7 +1048,10 @@ const webServer = http.createServer((req, res) => {
                 '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
                 '.png': 'image/png', '.jpg': 'image/jpeg'
             }[ext] || 'text/plain';
-            res.writeHead(200, { 'Content-Type': contentType, 'Access-Control-Allow-Origin': '*' });
+            // no-cache (revalidate): the app updates in place — a heuristically
+            // cached renderer script would silently keep OLD UI/logic after an upgrade
+            // (v57: the TTS dropdown shipped but the browser ran a stale app.js).
+            res.writeHead(200, { 'Content-Type': contentType, 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-cache' });
             res.end(content);
         })
         .catch(e => {

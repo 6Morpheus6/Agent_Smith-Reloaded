@@ -1676,7 +1676,10 @@ let connectionFailureCount = 0;
 let isHardwareMonitorActive = false;
 
 async function checkHardwareHealth() {
-    if (isWebMode) return;
+    // Web mode (Pinokio launcher / mobile) IS supported: the polyfill's invoke()
+    // proxies get-gpu-telemetry through /api/invoke. Only bail when there is no
+    // bridge at all — an Electron-less page without the polyfill.
+    if (!window.api || typeof window.api.invoke !== 'function') return;
     
     try {
         const telemetry = await window.api.invoke('get-gpu-telemetry');

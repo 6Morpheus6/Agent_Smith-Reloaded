@@ -1,7 +1,7 @@
 {
   "name": "agent-smith",
-  "version": "56.0.0",
-  "description": "Agent Smith Reloaded v56 — updatable AppImage: the Linux AppImage now ships with a gh-releases-zsync update channel baked into its header (plus the matching .AppImage.zsync delta file), so users can get incremental in-place updates from GitHub Releases instead of re-downloading the whole ~290MB image. Carries forward v55.9.2 explicit context control (APPLY button + no 32K snap-back).",
+  "version": "56.0.1",
+  "description": "Agent Smith Reloaded v56 — updatable AppImage: the Linux AppImage now ships with a gh-releases-zsync update channel baked into its header (plus the matching .AppImage.zsync delta file), so users can get incremental in-place updates from GitHub Releases instead of re-downloading the whole ~290MB image. Carries forward v55.9.2 explicit context control (APPLY button + no 32K snap-back). v56.0.1 adds a typed custom-context field next to the Auto-tune toggle: type ANY ctx value and press APPLY to reload LM Studio at exactly that window.",
   "homepage": "https://github.com/YOUR_GITHUB_USERNAME/agent-smith",
   "main": "main.js",
   "author": {

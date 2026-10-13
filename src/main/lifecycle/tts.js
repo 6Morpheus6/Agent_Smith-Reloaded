@@ -62,15 +62,27 @@ function resolvePiperRuntime(opts = {}) {
     return findRuntimeIn(candidates);
 }
 
-/** Minimal which(1): first executable match on PATH. */
+/**
+ * Minimal which(1): first executable match on PATH.
+ * Windows executables are never extension-less (powershell → powershell.exe),
+ * so on win32 the PATHEXT suffixes are tried too — without that, findPlayer()
+ * finds no player on Windows and TTS reports "no audio player available".
+ */
 function which(name) {
+    const isWin = process.platform === 'win32';
+    const exts = isWin
+        ? ['', ...(process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)]
+        : [''];
     const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
     for (const dir of dirs) {
-        try {
-            const candidate = path.join(dir, name);
-            fs.accessSync(candidate, fs.constants.X_OK);
-            return candidate;
-        } catch (_) { /* not here */ }
+        for (const ext of exts) {
+            const suffix = (ext && !name.toLowerCase().endsWith(ext.toLowerCase())) ? ext : '';
+            try {
+                const candidate = path.join(dir, name + suffix);
+                fs.accessSync(candidate, fs.constants.X_OK);
+                return candidate;
+            } catch (_) { /* not here — try next suffix / PATH entry */ }
+        }
     }
     return null;
 }

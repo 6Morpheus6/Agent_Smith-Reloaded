@@ -58,6 +58,12 @@
     // ANY context value and presses it to reload LM Studio at exactly that window; while a
     // manual apply is in flight, reflection must not fight the button over the slider.
     let _applyBtn = null;
+    // v56.0.1 — typed custom-context field (next to the Auto-tune toggle). The user types ANY
+    // ctx value and presses APPLY/Enter → applyCtx reloads LM Studio at exactly that window.
+    // The 10s reflection loop mirrors what's ACTUALLY loaded into it (when not being typed in),
+    // so it doubles as a live "current ctx" readout.
+    let _customCtxInput = null;
+    let _customApplyBtn = null;
     let _applyingCtx = false;
     let _lastProfile = null;
     let _applying = false;
@@ -163,6 +169,9 @@
             if (_els.ctxVal) _els.ctxVal.textContent = String(_loadedCtx);
             _applying = false;
         }
+        // v56.0.1 — mirror the verified window into the typed custom-context field too (never
+        // while the user is typing in it or a manual apply owns the value).
+        mirrorCustomCtx(_loadedCtx);
         // v55.9.1: verified-but-too-small → fix it in LM Studio now, for the user.
         if (_loadedCtx > 0 && _loadedCtx < minCtxFloor()) {
             ensureMinCtx(modelId);
@@ -308,6 +317,21 @@
         _applying = false;
     }
 
+    /**
+     * v56.0.1 — mirror a verified loaded context into the typed custom-context field, so it
+     * reads as "what LM Studio actually has right now". Skipped while the user is typing in
+     * the field (focused) or a manual apply is in flight — those own the value until done.
+     */
+    function mirrorCustomCtx(loadedCtx) {
+        if (!_customCtxInput || _applyingCtx) return;
+        const n = Number(loadedCtx);
+        if (!Number.isFinite(n) || n <= 0) return;
+        try {
+            if (typeof document !== 'undefined' && document.activeElement === _customCtxInput) return; // user is typing — don't clobber
+            _customCtxInput.value = String(Math.floor(n));
+        } catch (e) { /* element may be gone */ }
+    }
+
     async function syncContextForModel(modelId, contextLength) {
         if (!modelId || !contextLength) return null;
         const request = {
@@ -349,10 +373,15 @@
      * queues behind a busy run (the user asked for it NOW — the main-process manager serializes
      * against in-flight operations), and reports VRAM fallbacks honestly instead of snapping
      * the slider back to whatever was loaded before.
+     *
+     * v56.0.1 — TYPED VALUES: `contextLength` may come from the custom-context text field next
+     * to the Auto-tune toggle (any integer, e.g. "49152"). The same exact-value contract holds;
+     * what actually loaded is mirrored back onto BOTH the slider and the typed field.
      */
     async function applyCtx(modelId, contextLength) {
         const model = String(modelId || _modelSelect?.value || '');
         let requested = parseInt(contextLength ?? _els?.ctxSlider?.value, 10);
+        if (!Number.isFinite(requested)) requested = parseInt(_customCtxInput?.value, 10);
         if (!model || !Number.isFinite(requested)) return null;
         requested = Math.max(2048, Math.min(Number(_els?.ctxSlider?.max) || 262144, requested));
         const invoke = apiInvoke();
@@ -377,6 +406,9 @@
                 if (_els.ctxVal) _els.ctxVal.textContent = String(loaded);
                 _applying = false;
             }
+            // v56.0.1 — the typed field shows what ACTUALLY loaded (fallbacks included), so it
+            // never claims a window LM Studio didn't honor.
+            if (_customCtxInput && Number.isFinite(loaded) && loaded > 0) _customCtxInput.value = String(Math.floor(loaded));
             setChipStatus(syncLabel(result), result?.warning || '');
             return result;
         } catch (e) {
@@ -389,11 +421,14 @@
     }
 
     function setApplyBtnBusy(busy) {
-        if (!_applyBtn) return;
-        try {
-            _applyBtn.disabled = !!busy;
-            _applyBtn.textContent = busy ? 'APPLYING…' : 'APPLY';
-        } catch (e) { /* element may be gone */ }
+        // v56.0.1 — both APPLY buttons (slider + typed field) share the in-flight state.
+        const buttons = [_applyBtn, _customApplyBtn].filter(Boolean);
+        for (const b of buttons) {
+            try {
+                b.disabled = !!busy;
+                b.textContent = busy ? 'APPLYING…' : 'APPLY';
+            } catch (e) { /* element may be gone */ }
+        }
     }
 
     async function flushPendingContextSync() {
@@ -496,6 +531,21 @@
         _toggleEl = opts.toggleEl;
         // v55.9.2 — explicit APPLY button next to the ctx slider (see applyCtx).
         _applyBtn = opts.applyBtn || null;
+        // v56.0.1 — typed custom-context field + its own APPLY button (next to Auto-tune).
+        _customCtxInput = opts.customCtxInput || null;
+        _customApplyBtn = opts.customApplyBtn || null;
+        if (_customCtxInput && _customApplyBtn) {
+            const commitTypedCtx = () => {
+                try {
+                    applyCtx(_modelSelect?.value, _customCtxInput.value);
+                } catch (e) { /* reported via the chip */ }
+            };
+            _customApplyBtn.addEventListener('click', commitTypedCtx);
+            // Enter in the field commits — same as pressing APPLY.
+            _customCtxInput.addEventListener('keydown', (ev) => {
+                if (ev && ev.key === 'Enter') { ev.preventDefault(); commitTypedCtx(); }
+            });
+        }
         _invoke = opts.invoke || opts.api?.invoke || null;
         _getApiBaseUrl = opts.getApiBaseUrl || null;
         _isBusy = opts.isBusy || null;

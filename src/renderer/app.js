@@ -232,11 +232,20 @@ let ttsWarnedBroken = false;    // one honest system note per session when the e
 async function getTtsStatus() {
     if (!window.api || typeof window.api.invoke !== 'function') return null; // browser mode — no main process
     if (ttsStatusCache) return ttsStatusCache;
+    let res;
     try {
-        ttsStatusCache = await window.api.invoke('tts-status');
+        res = await window.api.invoke('tts-status');
     } catch (err) {
-        ttsStatusCache = { ok: false, reason: `status probe failed: ${err.message}` };
+        res = { ok: false, reason: `status probe failed: ${err.message}` };
     }
+    // The web /api/invoke proxy answers failures with {error,status} (401 before
+    // login, 404, 500…) — an object without `ok`/`reason`. Normalize it so the UI
+    // shows the real cause instead of falling back to "unknown reason", and do NOT
+    // cache it: a probe that failed transiently must be retried on the next call.
+    if (!res || typeof res !== 'object' || res.ok === undefined) {
+        return { ok: false, reason: (res && (res.error || res.reason)) || 'tts-status returned no status' };
+    }
+    ttsStatusCache = res;
     return ttsStatusCache;
 }
 
@@ -554,6 +563,9 @@ if (window.XKRuntimeProfileUI) {
         toggleEl: document.getElementById('auto-tune-toggle'),
         // v55.9.2 — explicit APPLY button next to the ctx slider (manual ctx reload).
         applyBtn: document.getElementById('ctx-apply-btn'),
+        // v56.0.1 — typed custom-context field + APPLY, right under the Auto-tune toggle.
+        customCtxInput: document.getElementById('custom-ctx-input'),
+        customApplyBtn: document.getElementById('custom-ctx-apply-btn'),
         getApiBaseUrl: () => effectiveApiBase(),
         isBusy: () => chatRunState.isBusy || codeRunState.isBusy
     });
@@ -2050,7 +2062,10 @@ let connectionFailureCount = 0;
 let isHardwareMonitorActive = false;
 
 async function checkHardwareHealth() {
-    if (isWebMode) return;
+    // Web mode (Pinokio launcher / mobile) IS supported: the polyfill's invoke()
+    // proxies get-gpu-telemetry through /api/invoke. Only bail when there is no
+    // bridge at all — an Electron-less page without the polyfill.
+    if (!window.api || typeof window.api.invoke !== 'function') return;
     
     try {
         const telemetry = await window.api.invoke('get-gpu-telemetry');

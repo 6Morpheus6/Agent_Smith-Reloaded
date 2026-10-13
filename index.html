@@ -33,7 +33,7 @@
             <div class="as-brand">
                 <span id="resource-status-dot" class="status-dot" title="Resource Status: Healthy"></span>
                 <h1 class="as-wordmark" data-text="AGENT SMITH RELOADED">AGENT SMITH RELOADED</h1>
-                <span id="app-version" class="as-version">v56.0.0</span>
+                <span id="app-version" class="as-version">v56.0.1</span>
             </div>
             <div class="as-subline">
                 <span class="as-tag">SYSTEM&nbsp;AGENT&nbsp;·&nbsp;LOCAL</span>
@@ -134,6 +134,14 @@
                             Auto-tune for model + hardware
                         </label>
                         <div id="runtime-profile-chip" class="chip-note" style="margin-bottom:0.5rem;"></div>
+                        <!-- v56.0.1 — TYPED CUSTOM CONTEXT: type ANY ctx value (tokens) and press APPLY (or Enter) to reload LM Studio at exactly that window. Always visible — it works with Auto-tune on or off, and mirrors whatever is actually loaded so it doubles as a live "current ctx" readout. -->
+                        <div class="param-group" style="margin-top:0.4rem;">
+                            <div class="param-row"><label for="custom-ctx-input">Custom Context</label><span class="chip-note">tokens · any value</span></div>
+                            <div class="sb-row" style="margin-top:0.3rem;">
+                                <input type="text" id="custom-ctx-input" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="e.g. 49152" class="sb-input-flex">
+                                <button id="custom-ctx-apply-btn" class="test-btn btn-ghost" title="Reload LM Studio with this exact context window">APPLY</button>
+                            </div>
+                        </div>
                         <!-- Manual tuning — hidden while Auto-tune is on (the default); revealed by app.js syncAutoTuneVisibility() when Auto-tune is off. -->
                         <div id="manual-tuning-fields">
                             <div class="param-row"><label for="temp-slider">Temperature</label><span class="param-val" id="temp-val">0.7</span></div>

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/YOUR_GITHUB_USERNAME/agent-smith/releases/tag/v56.0.0"><img src="https://img.shields.io/badge/version-56.0.0-00c853?style=flat-square&logo=github" alt="Version" /></a>
+  <a href="https://github.com/YOUR_GITHUB_USERNAME/agent-smith/releases/tag/v56.0.1"><img src="https://img.shields.io/badge/version-56.0.1-00c853?style=flat-square&logo=github" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>
   <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/engine-Electron%20%2B%20Node.js-8b5cf6?style=flat-square&logo=electron" alt="Engine" />

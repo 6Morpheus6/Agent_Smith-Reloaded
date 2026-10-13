@@ -74,6 +74,7 @@ afterEach(() => {
     delete global.window;
     delete global.localStorage;
     delete global.XKRuntimeProfile;
+    delete global.document; // v56.0.1 — focus-simulation in the typed-field tests
 });
 
 test('auto-tune immediately synchronizes the profile context with LM Studio', async () => {
@@ -362,4 +363,152 @@ test('flushPendingContextSync drops a stale sync after the selection moved (v52.
     busy = false;
     await ui.flushPendingContextSync();
     assert.deepEqual(contexts, [], 'stale sync for the previous model was dropped');
+});
+
+// --- v56.0.1: typed custom-context field (next to the Auto-tune toggle) --------
+
+function elementsWithTypedCtx() {
+    const els = elements();
+    els.customCtxInput = new FakeElement('');
+    els.customApplyBtn = new FakeElement();
+    return els;
+}
+
+test('v56.0.1 — typed ctx value reloads LM Studio at exactly that window and mirrors back', async () => {
+    const contexts = [];
+    const ui = loadUi(async (channel, opts) => {
+        if (channel === 'lmstudio-ensure-model') {
+            contexts.push(opts.contextLength);
+            return { managed: true, requestedContext: opts.contextLength, loadedContext: opts.contextLength, maxContext: 262144 };
+        }
+        return null;
+    });
+    const els = elementsWithTypedCtx();
+    ui.mount({
+        modelSelect: els.modelSelect,
+        sliders: els,
+        chipEl: els.chipEl,
+        toggleEl: els.toggleEl,
+        customCtxInput: els.customCtxInput,
+        customApplyBtn: els.customApplyBtn,
+        getApiBaseUrl: () => 'http://localhost:1234',
+        isBusy: () => false
+    });
+
+    // The user types a value the slider can't even express and presses APPLY.
+    els.customCtxInput.value = '98304';
+    const result = await ui.applyCtx('google/gemma-4-e4b', els.customCtxInput.value);
+    assert.deepEqual(contexts, [98304], 'the exact typed window was sent to LM Studio');
+    assert.equal(result.loadedContext, 98304);
+    // Both the slider and the typed field mirror what actually loaded.
+    assert.equal(els.ctxSlider.value, '98304');
+    assert.equal(els.customCtxInput.value, '98304');
+});
+
+test('v56.0.1 — Enter in the typed field commits (same as pressing APPLY)', async () => {
+    const contexts = [];
+    const ui = loadUi(async (channel, opts) => {
+        if (channel === 'lmstudio-ensure-model') {
+            contexts.push(opts.contextLength);
+            return { managed: true, loadedContext: opts.contextLength };
+        }
+        return null;
+    });
+    const els = elementsWithTypedCtx();
+    ui.mount({
+        modelSelect: els.modelSelect,
+        sliders: els,
+        chipEl: els.chipEl,
+        toggleEl: els.toggleEl,
+        customCtxInput: els.customCtxInput,
+        customApplyBtn: els.customApplyBtn,
+        getApiBaseUrl: () => 'http://localhost:1234',
+        isBusy: () => false
+    });
+
+    els.customCtxInput.value = '65536';
+    // FakeElement.dispatch has no preventDefault — call the keydown listener with a real event shape.
+    for (const fn of els.customCtxInput.listeners.get('keydown') || []) {
+        fn({ target: els.customCtxInput, key: 'Enter', preventDefault() {} });
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(contexts, [65536], 'Enter committed the typed value');
+
+    // The APPLY button commits too.
+    contexts.length = 0;
+    els.customCtxInput.value = '49152';
+    els.customApplyBtn.dispatch('click');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(contexts, [49152], 'APPLY button committed the typed value');
+});
+
+test('v56.0.1 — VRAM fallback: typed field shows what ACTUALLY loaded', async () => {
+    const ui = loadUi(async (channel, opts) => {
+        if (channel === 'lmstudio-ensure-model') {
+            return { managed: true, requestedContext: opts.contextLength, loadedContext: 49152, maxContext: 262144, fallbackUsed: true, warning: `Requested context ${opts.contextLength} could not load; using 49152.` };
+        }
+        return null;
+    });
+    const els = elementsWithTypedCtx();
+    ui.mount({
+        modelSelect: els.modelSelect,
+        sliders: els,
+        chipEl: els.chipEl,
+        toggleEl: els.toggleEl,
+        customCtxInput: els.customCtxInput,
+        customApplyBtn: els.customApplyBtn,
+        getApiBaseUrl: () => 'http://localhost:1234',
+        isBusy: () => false
+    });
+
+    els.customCtxInput.value = '98304';
+    const result = await ui.applyCtx('google/gemma-4-e4b', els.customCtxInput.value);
+    assert.equal(result.fallbackUsed, true);
+    // The field must not claim the 98304 window LM Studio refused.
+    assert.equal(els.customCtxInput.value, '49152');
+});
+
+test('v56.0.1 — reflection mirrors the verified loaded ctx into the typed field', async () => {
+    const ui = loadUi(async (channel) => {
+        if (channel === 'lmstudio-get-status') return { managed: true, loadedContext: 49152 };
+        return null;
+    });
+    const els = elementsWithTypedCtx();
+    ui.mount({
+        modelSelect: els.modelSelect,
+        sliders: els,
+        chipEl: els.chipEl,
+        toggleEl: els.toggleEl,
+        customCtxInput: els.customCtxInput,
+        customApplyBtn: els.customApplyBtn,
+        getApiBaseUrl: () => 'http://localhost:1234',
+        isBusy: () => false
+    });
+
+    // Mount already reflected once; force another read to be sure.
+    await ui.refreshCurrentLoadedContext();
+    assert.equal(els.customCtxInput.value, '49152');
+});
+
+test('v56.0.1 — reflection never clobbers the field while the user is typing', async () => {
+    const ui = loadUi(async (channel) => {
+        if (channel === 'lmstudio-get-status') return { managed: true, loadedContext: 49152 };
+        return null;
+    });
+    const els = elementsWithTypedCtx();
+    global.document = { activeElement: els.customCtxInput }; // user is typing in the field
+    ui.mount({
+        modelSelect: els.modelSelect,
+        sliders: els,
+        chipEl: els.chipEl,
+        toggleEl: els.toggleEl,
+        customCtxInput: els.customCtxInput,
+        customApplyBtn: els.customApplyBtn,
+        getApiBaseUrl: () => 'http://localhost:1234',
+        isBusy: () => false
+    });
+
+    els.customCtxInput.value = '131072'; // mid-typing value
+    await ui.refreshCurrentLoadedContext();
+    assert.equal(els.customCtxInput.value, '131072', 'focused field keeps the user\'s in-progress text');
 });

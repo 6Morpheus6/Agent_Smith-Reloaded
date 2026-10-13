@@ -1,5 +1,40 @@
 # Agent Smith Changelog
 
+## [56.0.1] - 2026-10-10 — ⌨️ Typed custom-context field (type ANY ctx, APPLY reloads LM Studio)
+
+User request: "on this version of agent smith i tested the autotune toggle and i decided i want a
+text field here that allows me to type in a custom value for ctx and apply it via reloading the model
+in lm studio for the user."
+
+### What changed
+- **`index.html`** — new "Custom Context" text input + APPLY button, placed directly under the
+  Auto-tune toggle (always visible, works with Auto-tune on or off). `inputmode="numeric"` so
+  touch keyboards offer digits.
+- **`src/renderer/ui/runtimeProfileUI.js`**:
+  - `mount()` now accepts `customCtxInput` + `customApplyBtn`. Pressing APPLY — or hitting Enter in
+    the field — calls the existing exact-value `applyCtx()`, which reloads LM Studio at exactly the
+    typed window (any value, including well above the 32000 minimum).
+  - The 10s reflection loop now mirrors what LM Studio ACTUALLY has loaded into the typed field too
+    (`mirrorCustomCtx`), so it doubles as a live "current ctx" readout. It never clobbers the field
+    while the user is typing in it (focused) or while an apply is in flight.
+  - After an apply, the field shows what ACTUALLY loaded — VRAM fallbacks included — so it never
+    claims a window LM Studio refused. Both APPLY buttons share one busy state ("APPLYING…").
+- **`src/renderer/app.js`** — passes the two new elements into `mount()`.
+
+### Why this is safe (no new IPC, no new core surface)
+The field reuses the exact same `applyCtx()` → `lmstudio-ensure-model` path the v55.9.2 slider APPLY
+button already uses. No new IPC channel, no main-process change — only a second entry point into an
+existing, serialized, loopback-only reload. The "already at/above requested = no-op" contract (v55.9.2)
+still holds: typing the same value twice never double-reloads a multi-GB model.
+
+### Tests
+- 5 new unit tests in `tests/runtimeProfileUI.test.js` (typed apply mirrors back, Enter commits, VRAM
+  fallback honesty, reflection mirror, no-clobber-while-typing). Full suite green.
+- Live E2E (`scripts/custom-ctx-live-e2e.js`) against REAL LM Studio using only
+  `gemma4-12b-qat-uncensored-hauhaucs-balanced`: typed 32768 → fresh load at exactly 32768; typed
+  49152 → unload + reload at exactly 49152 (3.2s); same value again → no-op (`reloaded:false`);
+  `/api/v0/models` confirms `loaded_context_length == 49152`; cleanup unloads gemma.
+
 ## [56.0.0] - 2026-10-09 — 🔄 Updatable AppImage (zsync) + .deb for v56
 
 User request: "other users have been asking me to make the appimage updateable and i dont know how

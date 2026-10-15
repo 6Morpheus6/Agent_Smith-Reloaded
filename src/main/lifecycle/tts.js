@@ -47,7 +47,7 @@ const VOICE_REPO_BASE = 'https://huggingface.co/6Morpheus6/piper-voices/resolve/
 const VOICES = {
     en: { label: 'English', voice: 'en_US-joe-medium', file: 'en/en_US/joe/medium/en_US-joe-medium.onnx',
         test: 'Agent Smith audio is operational.' },
-    de: { label: 'Deutsch', voice: 'de_DE-thorsten-medium', file: 'de/de_DE/thorsten/medium/de_DE-thorsten-medium.onnx',
+    de: { label: 'Deutsch', voice: 'de_DE-karlsson-low', file: 'de/de_DE/karlsson/low/de_DE-karlsson-low.onnx',
         test: 'Die Sprachausgabe von Agent Smith ist betriebsbereit.' },
     fr: { label: 'Français', voice: 'fr_FR-tom-medium', file: 'fr/fr_FR/tom/medium/fr_FR-tom-medium.onnx',
         test: "La synthèse vocale d'Agent Smith est opérationnelle." },

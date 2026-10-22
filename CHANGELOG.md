@@ -1,36 +1,85 @@
 # Agent Smith Changelog
 
-## [56.0.1] - 2026-10-10 — ⌨️ Typed custom-context field (type ANY ctx, APPLY reloads LM Studio)
+## [56.2.0] - 2026-10-20 — 🔄 In-app APP UPDATE (check / download / install from GitHub Releases)
 
-User request: "on this version of agent smith i tested the autotune toggle and i decided i want a
-text field here that allows me to type in a custom value for ctx and apply it via reloading the model
-in lm studio for the user."
+User request: "make a new version update of agent smith ... add an update button to the
+interface that can check for app update and update to the latest and also build the
+appimage and .deb" — v56.1.0's AppImage already carried the gh-releases-zsync header, but
+only users who knew `--appimage-upgrade` could use it. This release puts the whole update
+flow behind a button in the sidebar.
 
 ### What changed
-- **`index.html`** — new "Custom Context" text input + APPLY button, placed directly under the
-  Auto-tune toggle (always visible, works with Auto-tune on or off). `inputmode="numeric"` so
-  touch keyboards offer digits.
-- **`src/renderer/ui/runtimeProfileUI.js`**:
-  - `mount()` now accepts `customCtxInput` + `customApplyBtn`. Pressing APPLY — or hitting Enter in
-    the field — calls the existing exact-value `applyCtx()`, which reloads LM Studio at exactly the
-    typed window (any value, including well above the 32000 minimum).
-  - The 10s reflection loop now mirrors what LM Studio ACTUALLY has loaded into the typed field too
-    (`mirrorCustomCtx`), so it doubles as a live "current ctx" readout. It never clobbers the field
-    while the user is typing in it (focused) or while an apply is in flight.
-  - After an apply, the field shows what ACTUALLY loaded — VRAM fallbacks included — so it never
-    claims a window LM Studio refused. Both APPLY buttons share one busy state ("APPLYING…").
-- **`src/renderer/app.js`** — passes the two new elements into `mount()`.
+- **APP UPDATE section** (`index.html`, new `src/renderer/ui/appUpdatePanel.js`) — new
+  collapsible sidebar section (next to BUILD ASSETS) with CHECK FOR UPDATES, DOWNLOAD
+  UPDATE and INSTALL UPDATE buttons, live download progress bar, release-notes preview,
+  and honest error states. Auto-expands while an operation runs; driven by the
+  `update-event` push channel + `updater-status` invoke for catch-up state.
+- **Updater engine** (new `src/main/lifecycle/updater.js`, registered in `main.js`) —
+  - `updater-check`: GETs `api.github.com/repos/6Morpheus6/Agent_Smith-Reloaded/releases/latest`,
+    compares the tag against `app.getVersion()` numerically (semver, not lexicographic),
+    reports what's new. API errors surface as `{ok:false,error}` — never a crash.
+  - `updater-download`: fetches the matching asset for this platform/arch (AppImage on
+    linux x64, .deb fallback) into `<userData>/updates/` with live progress, then verifies
+    SHA-256 against the digest GitHub publishes per asset (`sha256:<hex>`). A mismatch is a
+    hard failure — no corrupted install.
+  - `updater-install`:
+      * **AppImage installs** — atomic rename-swap of `process.execPath` (copy to
+        `<exe>.new-<ts>`, prune old backups, rename current → `<exe>.old-<ts>` backup,
+        rename staged → exe), then `app.relaunch()` + exit so the NEW image starts. The
+        previous version is kept as a one-slot rolling backup; orphaned `.new-*` files from
+        crashed swaps are pruned on the next install.
+      * **.deb installs** — hands off to `apt-get install -y <file>` (or `sudo -S apt-get`
+        when the SUDO OVERRIDE field has a password); permission failures tell the user to
+        use SUDO OVERRIDE and retry.
+      * **dev checkouts** (`npm start`) — honest no-op error: there is no installed image
+        to swap.
+  - One operation at a time (busy guard) so check/download/install can't race.
+- **IPC whitelist** (`src/shared/ipcChannels.js`) — `updater-status`, `updater-check`,
+  `updater-download`, `updater-install` (invoke) + `update-event` (receive).
+- **Tests** (`tests/updater.test.js`, 21 tests, all green) — semver compare, release JSON
+  normalization, asset picking per platform/arch, digest handling, install-kind detection,
+  the real rename-swap in temp dirs (backup kept, older backups pruned, non-writable dir
+  refused), and every IPC handler with stubbed fetch/download/app: verified + mismatched
+  checksums, swap+relaunch+exit, apt hand-off via a fake `apt-get`, sudo-override prompt,
+  dev no-op, busy rejection.
 
-### Why this is safe (no new IPC, no new core surface)
-The field reuses the exact same `applyCtx()` → `lmstudio-ensure-model` path the v55.9.2 slider APPLY
-button already uses. No new IPC channel, no main-process change — only a second entry point into an
-existing, serialized, loopback-only reload. The "already at/above requested = no-op" contract (v55.9.2)
-still holds: typing the same value twice never double-reloads a multi-GB model.
+### Packaging
+- Updatable AppImage (`Agent.Smith.Reloaded-56.2.0.AppImage` + `.zsync`) — same
+  gh-releases-zsync channel as v56/v56.1.0, so existing users update incrementally in place;
+  the new in-app button is what makes that visible to them.
+- .deb alongside (`agent-smith_56.2.0_amd64.deb`).
 
-### Tests
-- 5 new unit tests in `tests/runtimeProfileUI.test.js` (typed apply mirrors back, Enter commits, VRAM
-  fallback honesty, reflection mirror, no-clobber-while-typing). Full suite green.
-- Live E2E (`scripts/custom-ctx-live-e2e.js`) against REAL LM Studio using only
+## [56.1.0] - 2026-10-14 — 🌍 Multi-language Piper TTS (VOICE LANGUAGE dropdown, on-demand voice download) + no-cache web server
+
+User request: "a new version of agent smith that i need rebuilt" — the morpheus
+branch carries the multi-language TTS work forward from v56.0.1 as a proper
+release: 56.1.0, updatable AppImage (zsync) + .deb, clean source zip.
+
+### What changed
+- **Multi-language Piper TTS** (`src/main/lifecycle/tts.js`, `index.html`,
+  `src/renderer/app.js`, `src/shared/ipcChannels.js`) — new VOICE LANGUAGE
+  dropdown next to SPEAK RESPONSES with seven male voices (EN, DE, FR, ES, IT,
+  PL, RU; medium quality except Italian, which only exists as x_low). The
+  selected voice model is downloaded on demand from the user's HuggingFace
+  clone of rhasspy/piper-voices into the first writable `resources/piper/voices/`
+  dir — a fresh checkout (empty voices/) works out of the box in both Pinokio
+  launcher mode and manual installs. Download progress is pushed to desktop +
+  web UIs via the new `tts-event` push channel; unknown language codes fall
+  back to English.
+- **German voice swap** — DE now uses `de_DE-karlsson-low` (the exchanged model).
+- **Executable bits on Linux piper binaries** (`resources/piper/piper`,
+  `resources/piper/espeak-ng`) so the bundled runtime runs without a manual chmod.
+- **No-cache headers on the built-in web server** (`main.js`) — static files now
+  send `Cache-Control: no-cache` (revalidate). The app updates in place via zsync;
+  a heuristically cached renderer script would silently keep OLD UI/logic after an
+  upgrade (this bit us when the TTS dropdown shipped but browsers ran stale app.js).
+
+### Packaging
+- Updatable AppImage with `gh-releases-zsync|6Morpheus6|Agent_Smith-Reloaded|latest`
+  UPDATEINFO header + matching `.AppImage.zsync` delta file — same channel as v56,
+  so existing users update incrementally in place.
+- .deb alongside, as usual.
+
   `gemma4-12b-qat-uncensored-hauhaucs-balanced`: typed 32768 → fresh load at exactly 32768; typed
   49152 → unload + reload at exactly 49152 (3.2s); same value again → no-op (`reloaded:false`);
   `/api/v0/models` confirms `loaded_context_length == 49152`; cleanup unloads gemma.

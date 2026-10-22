@@ -52,6 +52,8 @@ const INVOKE_CHANNELS = [
     // v55.5: Piper TTS — SPEAK RESPONSES engine (status probe + speak request).
     // v57: tts-ensure-voice = check + auto-download the selected language model.
     'tts-status', 'tts-speak', 'tts-ensure-voice',
+    // v56.2: in-app APP UPDATE — check GitHub Releases, download + verify the asset, install.
+    'updater-status', 'updater-check', 'updater-download', 'updater-install',
     'ghosttrace-append'
 ];
 
@@ -66,7 +68,9 @@ const RECEIVE_CHANNELS = [
     // v55.3: Electron Depot auto-provisioning progress (detect/download/verify).
     'electron-assets-event',
     // v57: Piper voice download progress (tts-ensure-voice / first speak).
-    'tts-event'
+    'tts-event',
+    // v56.2: in-app APP UPDATE — check/download/install from GitHub Releases.
+    'update-event'
 ];
 
 const api = { INVOKE_CHANNELS, SEND_CHANNELS, RECEIVE_CHANNELS };

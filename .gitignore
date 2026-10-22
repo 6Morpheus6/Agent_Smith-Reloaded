@@ -29,5 +29,7 @@ src/data/ghosttrace/
 Thumbs.db
 *.log
 
-# electron
-vendor/
+#Electron
+vendor/electron-builder
+vendor/electron
+vendor/*.AppImage

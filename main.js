@@ -214,6 +214,11 @@ const registerTtsIpc = require('./src/main/lifecycle/tts.js');
 try { registerTtsIpc(ipcMain, { pushEvent }); }
 catch (e) { console.error('[startup] TTS IPC registration skipped:', (e && e.message) || e); }
 
+// v56.2: APP UPDATE — in-app update checker/installer from GitHub Releases.
+const registerUpdaterIpc = require('./src/main/lifecycle/updater.js');
+try { registerUpdaterIpc(ipcMain, { app, pushEvent }); }
+catch (e) { console.error('[startup] Updater IPC registration skipped:', (e && e.message) || e); }
+
 // IPC domains (open-file-dialog, auth, history, agent, edit, project, plan,
 // ledger, git, memory, plugins) are registered from src/main/ipc/* near the
 // bottom of this file via registerAllIpc(ipcMain, ipcDeps). OS/lifecycle

@@ -33,7 +33,7 @@
             <div class="as-brand">
                 <span id="resource-status-dot" class="status-dot" title="Resource Status: Healthy"></span>
                 <h1 class="as-wordmark" data-text="AGENT SMITH RELOADED">AGENT SMITH RELOADED</h1>
-                <span id="app-version" class="as-version">v56.1.0</span>
+                <span id="app-version" class="as-version">v56.2.0</span>
             </div>
             <div class="as-subline">
                 <span class="as-tag">SYSTEM&nbsp;AGENT&nbsp;·&nbsp;LOCAL</span>
@@ -225,6 +225,31 @@
                     </div>
                     <div class="sb-row" style="margin-top:0.5rem;">
                         <button id="electron-assets-retry-btn" class="test-btn btn-ghost" style="display:none;">RETRY DOWNLOAD</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- v56.2: in-app updates from GitHub Releases. CHECK FOR UPDATES queries the latest
+                 release of 6Morpheus6/Agent_Smith-Reloaded; when a newer one exists, DOWNLOAD UPDATE
+                 fetches + SHA-256-verifies the AppImage/.deb for this platform, and INSTALL UPDATE swaps
+                 the new image into place (AppImage install — old version kept as backup) or hands off to
+                 apt (.deb). Driven by src/renderer/ui/appUpdatePanel.js. -->
+            <section class="xk-section xk-subsection collapsed" data-section="appupdate">
+                <header class="xk-section-header"><span class="xk-section-title">APP UPDATE</span><span class="xk-chevron">▾</span></header>
+                <div class="xk-section-body">
+                    <div id="updater-status-line" class="chip-note">Checking…</div>
+                    <p class="chip-note" style="margin-top:0.3rem;">Updates come from the Agent_Smith-Reloaded GitHub Releases. AppImage installs swap in place (previous version kept as a backup); .deb installs run through apt — use SUDO OVERRIDE below for the password.</p>
+                    <div id="updater-release-notes" class="chip-note" style="display:none;margin-top:0.4rem;"></div>
+                    <div id="updater-progress-wrap" style="display:none;margin-top:0.5rem;">
+                        <div id="updater-progress-name" class="chip-note"></div>
+                        <div class="hw-bar" style="margin-top:4px;"><span id="updater-progress-fill" class="hw-bar-fill" style="width:0%;"></span></div>
+                    </div>
+                    <div class="sb-row" style="margin-top:0.5rem;">
+                        <button id="updater-check-btn" class="test-btn">CHECK FOR UPDATES</button>
+                        <button id="updater-download-btn" class="test-btn btn-ghost" disabled>DOWNLOAD UPDATE</button>
+                    </div>
+                    <div class="sb-row" style="margin-top:0.4rem;">
+                        <button id="updater-install-btn" class="test-btn" disabled>INSTALL UPDATE</button>
                     </div>
                 </div>
             </section>

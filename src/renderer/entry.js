@@ -36,3 +36,4 @@ require('./ui/modeBar.js');
 require('./ui/modelPicker.js');
 require('./ui/imageGenPanel.js');
 require('./ui/electronAssetsPanel.js'); // v55.3: BUILD ASSETS — depot auto-provisioning progress (window.XKElectronAssetsPanel)
+require('./ui/appUpdatePanel.js');      // v56.2: APP UPDATE — check/download/install from GitHub Releases (window.XKAppUpdatePanel)

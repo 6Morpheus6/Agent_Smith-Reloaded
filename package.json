@@ -1,7 +1,7 @@
 {
   "name": "agent-smith",
-  "version": "56.1.0",
-  "description": "Agent Smith Reloaded v56 — updatable AppImage: the Linux AppImage now ships with a gh-releases-zsync update channel baked into its header (plus the matching .AppImage.zsync delta file), so users can get incremental in-place updates from GitHub Releases instead of re-downloading the whole ~290MB image. Carries forward v55.9.2 explicit context control (APPLY button + no 32K snap-back). v56.1.0 adds MultiTTS for windows and Linux.",
+  "version": "56.2.0",
+  "description": "Agent Smith Reloaded v56 — updatable AppImage: the Linux AppImage ships with a gh-releases-zsync update channel baked into its header (plus the matching .AppImage.zsync delta file), so users can get incremental in-place updates from GitHub Releases instead of re-downloading the whole ~290MB image. Carries forward v55.9.2 explicit context control (APPLY button + no 32K snap-back). v56.0.1 adds a typed custom-context field next to the Auto-tune toggle: type ANY ctx value and press APPLY to reload LM Studio at exactly that window. v56.1.0 adds multi-language Piper TTS: a VOICE LANGUAGE dropdown (EN/DE/FR/ES/IT/PL/RU, male medium-quality voices) with on-demand voice download from HuggingFace, plus no-cache headers on the built-in web server so in-place updates never serve stale renderer scripts. v56.2.0 adds an in-app APP UPDATE section: CHECK FOR UPDATES queries the GitHub Releases API for 6Morpheus6/Agent_Smith-Reloaded, and when a newer release exists it downloads the matching AppImage or .deb (with live progress), verifies its SHA-256 against the published asset digest, stages it in userData, and — on the AppImage install — swaps the new image into place (backing up the old one) and relaunches; .deb installs hand off to the system package manager.",
   "homepage": "https://github.com/YOUR_GITHUB_USERNAME/agent-smith",
   "main": "main.js",
   "author": {

@@ -33,7 +33,7 @@
             <div class="as-brand">
                 <span id="resource-status-dot" class="status-dot" title="Resource Status: Healthy"></span>
                 <h1 class="as-wordmark" data-text="AGENT SMITH RELOADED">AGENT SMITH RELOADED</h1>
-                <span id="app-version" class="as-version">v56.2.0</span>
+                <span id="app-version" class="as-version">v56.4.0</span>
             </div>
             <div class="as-subline">
                 <span class="as-tag">SYSTEM&nbsp;AGENT&nbsp;·&nbsp;LOCAL</span>
@@ -280,9 +280,25 @@
             <section class="xk-section xk-subsection collapsed" data-section="connect">
                 <header class="xk-section-header"><span class="xk-section-title">CONNECT</span><span class="xk-chevron">▾</span></header>
                 <div class="xk-section-body">
+                    <!-- v56.4: PROVIDER SWITCH — LM Studio (OpenAI-compatible /v1) or Ollama
+                         (/api/chat). The selected provider drives the model list, connection
+                         status, chat/agent streaming and context handling; each keeps its own
+                         server URL so switching back and forth never loses a setting. -->
+                    <div class="field">
+                        <label for="provider-select">PROVIDER</label>
+                        <select id="provider-select" aria-label="Model provider">
+                            <option value="lmstudio">LM Studio</option>
+                            <option value="ollama">Ollama</option>
+                        </select>
+                    </div>
                     <div id="lms-server-container" class="field">
                         <label for="lms-server-input">LM STUDIO (URL)</label>
                         <input type="text" id="lms-server-input" value="http://127.0.0.1:1234">
+                    </div>
+                    <!-- v56.4: Ollama server URL — hidden while LM Studio is the active provider. -->
+                    <div id="ollama-server-container" class="field" style="display:none;">
+                        <label for="ollama-server-input">OLLAMA (URL)</label>
+                        <input type="text" id="ollama-server-input" value="http://127.0.0.1:11434">
                     </div>
                     <!-- v50: LM Studio is the only provider — the Kimi K3 cloud toggle + key/model fields are gone. -->
                     <!-- Web Remote URL + WhatsApp linking now live behind the 📱 / 💬 buttons in the composer. -->

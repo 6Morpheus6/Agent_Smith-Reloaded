@@ -3,10 +3,10 @@
 
 // Native-binary doctor.
 //
-// node_modules holds platform-specific native binaries (the esbuild compiler and the
-// Electron runtime). Copying a project folder between Linux and Windows — or any install
-// that pulled the wrong platform — leaves binaries that don't match THIS OS, which fails
-// hard at startup:
+// node_modules holds platform-specific native binaries (the esbuild compiler, the
+// Electron runtime, and sharp's libvips-backed image binding). Copying a project folder
+// between Linux and Windows — or any install that pulled the wrong platform — leaves
+// binaries that don't match THIS OS, which fails hard at startup:
 //   * esbuild: "Host version X does not match binary version Y" (prestart build dies)
 //   * Electron: loads a wrong-platform/version V8 snapshot and crashes with 0x80000003
 //     (STATUS_BREAKPOINT) BEFORE the 'ready' event — the window never opens, no JS error.
@@ -81,7 +81,29 @@ function checkElectron() {
     log('electron repaired');
 }
 
-for (const [name, fn] of [['esbuild', checkEsbuild], ['electron', checkElectron]]) {
+// sharp (pulled in by @xenova/transformers for memory embeddings) ships its native binding
+// as build/Release/sharp-<platform>-<arch>.node plus a vendored libvips tree under
+// vendor/<ver>/<platform>-<arch>/lib that the binding links against via rpath. Both are
+// fetched by sharp's install script at npm-install time, so copying the project folder
+// between machines — or an interrupted/offline install — can leave the JS wrapper in place
+// while the binary (or its .so files) is missing. The app then dies with "sharp module
+// missing" / "Could not load the sharp module" when memory embeddings first run. A require()
+// probe catches every variant of that; re-running sharp's install script via npm rebuild
+// restores the prebuilt binary (and no-ops on a healthy tree).
+function checkSharp() {
+    const sharpDir = path.join(nm, 'sharp');
+    if (!fs.existsSync(path.join(sharpDir, 'package.json'))) return; // not installed — nothing to guard
+    let healthy = false;
+    try { require('sharp'); healthy = true; } catch (_) { /* binding or vendored libvips missing */ }
+    if (healthy) return;
+    log(`sharp native binary broken for ${platform}-${arch} — re-running its install script`);
+    runNpm(['rebuild', 'sharp']);
+    // Re-probe: npm rebuild can "succeed" while still offline-broken; surface the real state.
+    try { require('sharp'); } catch (_) { throw new Error(`still broken after repair (offline? sharp's prebuilt libvips download needs network) — re-run 'npm install' with connectivity`); }
+    log('sharp repaired');
+}
+
+for (const [name, fn] of [['esbuild', checkEsbuild], ['electron', checkElectron], ['sharp', checkSharp]]) {
     try { fn(); } catch (e) { console.error(`[check-native] ${name} repair failed: ${e.message}`); }
 }
 

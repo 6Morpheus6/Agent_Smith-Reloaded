@@ -1,5 +1,28 @@
 # Agent Smith Changelog
 
+## [56.3.0] - 2026-10-22 — 🔧 Native-binary doctor now covers sharp (self-healing "sharp module missing")
+
+User report: the terminal showed a "sharp module missing" error after updating, and it was
+unclear what sharp even is or whether it relates to updates. It does not — sharp is an
+image-processing library (libvips wrapper) pulled in transitively by `@xenova/transformers`,
+which `memory.js` uses for local text embeddings (all-MiniLM-L6-v2). The APP UPDATE system
+only borrows `imageGenManager.downloadFile()` as its HTTP helper.
+
+Root cause of the symptom class: sharp's native binding (`build/Release/sharp-linux-x64.node`)
+and its vendored libvips tree (`vendor/<ver>/linux-x64/lib/*.so`, linked via rpath) are fetched
+by sharp's install script at `npm install` time. Copying the project folder between machines —
+or an interrupted/offline install — can leave the JS wrapper in place while the binary or its
+`.so` files vanish, and the app then dies with "sharp module missing" / "Could not load the
+sharp module" when memory embeddings first run.
+
+### What changed
+- **Native-binary doctor** (`scripts/check-native.js`) — gains a `checkSharp()` step alongside
+  the existing esbuild/electron checks: probes `require('sharp')` (catches every variant of the
+  failure, including missing vendored libvips), and on failure re-runs sharp's install script via
+  `npm rebuild sharp`, then re-probes. A still-broken tree after repair fails loudly with a
+  connectivity hint instead of shipping a broken build. Runs automatically in `prestart`/`predist`,
+  so both `npm start` and `npm run dist:updatable` self-heal before they can fail on it.
+
 ## [56.2.0] - 2026-10-20 — 🔄 In-app APP UPDATE (check / download / install from GitHub Releases)
 
 User request: "make a new version update of agent smith ... add an update button to the

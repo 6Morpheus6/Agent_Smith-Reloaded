@@ -69,6 +69,13 @@
     let _applying = false;
     let _invoke = null;
     let _getApiBaseUrl = null;
+    // v56.4: provider switch — the ctx reflect/reload machinery is LM Studio-only (it drives
+    // the lms CLI + management API). While Ollama is active these paths no-op so a 10s loop
+    // never hammers an endpoint that has no /api/v1/models, and the slider keeps its value.
+    let _getProvider = null;
+    function providerIsOllama() {
+        try { return typeof _getProvider === 'function' && _getProvider() === 'ollama'; } catch (e) { return false; }
+    }
     let _isBusy = null;
     // v55.9.2: the ctx slider's debounced auto-sync is gone (the APPLY button owns it), so the
     // _debounceMs/_ctxTimer bookkeeping went with it.
@@ -151,6 +158,9 @@
      */
     async function refreshLoadedContext(modelId) {
         if (!modelId || !_els?.ctxSlider) return null;
+        // v56.4: Ollama has no management API — nothing to reflect or reload against, and the
+        // slider keeps whatever value auto-tune/the user set (Ollama honors num_ctx per request).
+        if (providerIsOllama()) { _loadedCtx = null; return null; }
         const invoke = apiInvoke();
         if (typeof invoke !== 'function') return null;
         let result = null;
@@ -334,6 +344,8 @@
 
     async function syncContextForModel(modelId, contextLength) {
         if (!modelId || !contextLength) return null;
+        // v56.4: Ollama has no management API — the per-request num_ctx is already in effect.
+        if (providerIsOllama()) return null;
         const request = {
             apiBaseUrl: currentApiBase(),
             model: modelId,
@@ -383,6 +395,8 @@
         let requested = parseInt(contextLength ?? _els?.ctxSlider?.value, 10);
         if (!Number.isFinite(requested)) requested = parseInt(_customCtxInput?.value, 10);
         if (!model || !Number.isFinite(requested)) return null;
+        // v56.4: Ollama has no management API to reload against — the value applies per-request.
+        if (providerIsOllama()) { setChipStatus(`ctx ${requested} (per-request)`, 'Ollama honors num_ctx on every request — nothing to reload.'); return null; }
         requested = Math.max(2048, Math.min(Number(_els?.ctxSlider?.max) || 262144, requested));
         const invoke = apiInvoke();
         if (typeof invoke !== 'function') return null;
@@ -548,6 +562,8 @@
         }
         _invoke = opts.invoke || opts.api?.invoke || null;
         _getApiBaseUrl = opts.getApiBaseUrl || null;
+        // v56.4: provider switch (LM Studio vs Ollama) — see providerIsOllama().
+        _getProvider = opts.getProvider || null;
         _isBusy = opts.isBusy || null;
 
         if (_toggleEl) {

@@ -376,13 +376,53 @@ const uplinkMode = { checked: true }; // Forced true in v39.4: Ollama removed fr
 const lmsServerContainer = document.getElementById('lms-server-container');
 const lmsServerInput = document.getElementById('lms-server-input');
 
+// v56.4: PROVIDER SWITCH — 'lmstudio' (OpenAI-compatible /v1) or 'ollama' (/api/chat).
+// The dropdown in the CONNECT section drives this; each provider keeps its own URL so
+// switching back and forth never loses a setting. Persisted across restarts.
+const providerSelect = document.getElementById('provider-select');
+const ollamaServerContainer = document.getElementById('ollama-server-container');
+const ollamaServerInput = document.getElementById('ollama-server-input');
+
+function readProvider() {
+    try { return localStorage.getItem('agentsmith_provider') === 'ollama' ? 'ollama' : 'lmstudio'; } catch (e) { return 'lmstudio'; }
+}
+let activeProvider = readProvider();
+// uplinkMode.checked is the wire-format switch used throughout the chat loop:
+// true = OpenAI/LM Studio format, false = Ollama native format.
+uplinkMode.checked = activeProvider !== 'ollama';
+
+function setProvider(provider) {
+    const next = provider === 'ollama' ? 'ollama' : 'lmstudio';
+    if (next === activeProvider && uplinkMode.checked === (next !== 'ollama')) return;
+    activeProvider = next;
+    uplinkMode.checked = next !== 'ollama';
+    try { localStorage.setItem('agentsmith_provider', next); } catch (e) {}
+    syncProviderUI();
+}
+
+function syncProviderUI() {
+    if (providerSelect && providerSelect.value !== activeProvider) providerSelect.value = activeProvider;
+    const ollamaActive = activeProvider === 'ollama';
+    if (lmsServerContainer) lmsServerContainer.style.display = ollamaActive ? 'none' : '';
+    if (ollamaServerContainer) ollamaServerContainer.style.display = ollamaActive ? '' : 'none';
+}
+
 // v50: LM Studio is the ONLY model provider. The Kimi K3 cloud toggle (v48) is gone;
 // these accessors stay so the many call sites below keep working unchanged — they now
 // resolve to "local backend, no API key" always.
 const kimiK3Toggle = document.getElementById('kimi-k3-toggle'); // null in v50 UI (kept for persistence guards)
 function kimiK3Active() { return false; }
 function kimiK3ApiKey() { return ''; }
-function effectiveApiBase() { return currentApiBase; }
+// v56.4: the effective base follows the ACTIVE provider — LM Studio's /v1-compatible
+// server or Ollama's native API root.
+function effectiveApiBase() {
+    if (activeProvider === 'ollama') {
+        let u = ollamaServerInput ? ollamaServerInput.value.trim() : '';
+        if (!u) u = 'http://127.0.0.1:11434';
+        return u.replace(/\/+$/, '');
+    }
+    return currentApiBase;
+}
 function activeApiKey() { return 'lm-studio'; }
 function activeModel() {
     return modelSelect?.value;
@@ -640,6 +680,9 @@ if (window.XKRuntimeProfileUI) {
         customCtxInput: document.getElementById('custom-ctx-input'),
         customApplyBtn: document.getElementById('custom-ctx-apply-btn'),
         getApiBaseUrl: () => effectiveApiBase(),
+        // v56.4: the ctx auto-tune/reflect machinery talks to LM Studio's management API —
+        // Ollama has none, so the UI module no-ops its reloads while Ollama is active.
+        getProvider: () => activeProvider,
         isBusy: () => chatRunState.isBusy || codeRunState.isBusy
     });
 }
@@ -935,8 +978,9 @@ if (hereBtn) {
     }
 })();
 
-const OLLAMA_API = 'http://127.0.0.1:11434/api';
 let currentApiBase = 'http://127.0.0.1:1234'; 
+// v56.4: Ollama's base is read from the OLLAMA (URL) field via effectiveApiBase() —
+// the old hardcoded OLLAMA_API constant went with it.
 // v52.2: true once the USER explicitly picks a model from the dropdown this
 // session — their choice then wins over the "follow what LM Studio has loaded"
 // default (which only applies until they steer). Reset when the backend URL changes.
@@ -951,6 +995,30 @@ if (lmsServerInput) {
     });
 }
 
+// v56.4: Ollama URL field — same contract as the LM Studio one, but only acts while
+// Ollama is the active provider (the base it feeds is read by effectiveApiBase()).
+if (ollamaServerInput) {
+    ollamaServerInput.addEventListener('change', () => {
+        if (activeProvider !== 'ollama') return;
+        userPickedModel = false; // new backend — resume default model-following
+        notifyHostBackend();
+        fetchModels();
+    });
+}
+
+// v56.4: PROVIDER dropdown — switch the whole app between LM Studio and Ollama.
+if (providerSelect) {
+    providerSelect.addEventListener('change', () => {
+        setProvider(providerSelect.value);
+        userPickedModel = false; // new backend — resume default model-following
+        // A queued LM Studio swap must not fire against the NEW provider's URL later.
+        pendingModelSwap = null;
+        notifyHostBackend();
+        fetchModels();
+        checkConnection();
+    });
+}
+
 function updateApiBase() {
     let server = lmsServerInput.value.trim();
     if (server.endsWith('/')) server = server.slice(0, -1);
@@ -958,13 +1026,17 @@ function updateApiBase() {
     // v52.2: a new backend means the old "user picked" choice no longer applies —
     // resume following whatever this LM Studio instance has loaded by default.
     userPickedModel = false;
-    // Notify host of URL change (proxy origin + embeddings fallback). Best-effort:
-    // a failure here must NEVER abort the caller (it used to throw "Blocked IPC
-    // channel: set-lms-url", which skipped fetchModels() so the model list never
-    // reloaded for the new backend → "can't pick a model / can't build").
-    // Second array element pins the MEMORY/embeddings base — when Kimi K3 is active
-    // the chat/agent/code base is remote (no embeddings API), so memory keeps using
-    // the local backend.
+    notifyHostBackend();
+}
+
+// Push the ACTIVE provider's base to main (proxy allow-list + embeddings fallback).
+// Best-effort: a failure here must NEVER abort the caller (it used to throw "Blocked IPC
+// channel: set-lms-url", which skipped fetchModels() so the model list never reloaded
+// for the new backend → "can't pick a model / can't build"). Second array element pins
+// the MEMORY/embeddings base — memory keeps using LM Studio's OpenAI-compatible
+// embeddings endpoint even while chat runs on Ollama (Ollama's native API has no
+// /v1/embeddings, and v55.1+ uses the bundled transformer model as primary anyway).
+function notifyHostBackend() {
     try {
         const p = window.api.invoke('set-lms-url', [effectiveApiBase(), currentApiBase]);
         if (p && p.catch) p.catch(() => {});
@@ -980,7 +1052,9 @@ function syncKimiK3UI() {
 }
 
 // Push the local backend state to the main process (proxy allow-list + code fallback
-// base + memory base) so a relaunch is correct from boot.
+// base + memory base) so a relaunch is correct from boot. v56.4: also mirror the
+// persisted provider choice into the dropdown + URL visibility before first paint.
+syncProviderUI();
 syncKimiK3UI();
 updateApiBase();
 
@@ -1436,7 +1510,9 @@ async function pageOutModel(modelName) {
     try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
-        await fetch(`${OLLAMA_API}/chat`, {
+        // v56.4: page out against the ACTIVE Ollama base (custom URLs included), not just
+        // the hardcoded loopback default.
+        await fetch(`${effectiveApiBase()}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: modelName, messages: [], keep_alive: 0 }),
@@ -1901,6 +1977,45 @@ async function fetchModels(retries = 3) {
         }
         modelSelect.value = id;
     };
+    // v56.4: OLLAMA — list models from the native /api/tags endpoint (Ollama's canonical
+    // model list; it also serves OpenAI-compatible /v1, which is what Code Mode uses). No
+    // "loaded" concept to follow: Ollama loads on demand, so the remembered selection wins.
+    if (activeProvider === 'ollama') {
+        try {
+            const modelsController = new AbortController();
+            const modelsTimeoutId = setTimeout(() => modelsController.abort(new Error('Model list fetch timed out')), 15000);
+            const res = await fetch(`${effectiveApiBase()}/api/tags`, { signal: modelsController.signal }).finally(() => clearTimeout(modelsTimeoutId));
+            if (!res.ok) throw new Error('AI Backend Offline or Incorrect URL');
+            const data = await res.json();
+            const models = Array.isArray(data?.models) ? data.models.map(m => m.name || m.model).filter(Boolean) : [];
+            delete modelSelect.dataset.loadedModelId; // no LOADED badge on Ollama (JIT load)
+            if (models.length > 0) {
+                modelSelect.innerHTML = models.map(id => `<option value="${id}">${id}</option>`).join('');
+                const rememberedOllama = (() => { try { return localStorage.getItem('agentsmith_last_model_ollama') || ''; } catch { return ''; } })();
+                if (remembered && models.includes(remembered)) modelSelect.value = remembered;
+                else if (rememberedOllama && models.includes(rememberedOllama)) modelSelect.value = rememberedOllama;
+                else modelSelect.value = models[0];
+                // Auto-tune the sliders for this model (ctx/temperature apply per-request on Ollama).
+                if (window.XKRuntimeProfileUI) {
+                    await window.XKRuntimeProfileUI.applyForCurrentModel();
+                }
+            } else {
+                // Reachable but no models pulled yet — keep the remembered one usable.
+                if (remembered) ensureOption(remembered);
+                else modelSelect.innerHTML = '<option value="" disabled selected>No models found — pull one with: ollama pull <model></option>';
+            }
+        } catch (err) {
+            console.error(`Fetch Models Error (retries left: ${retries}):`, err);
+            if (retries > 0) {
+                if (!modelSelect.value || modelSelect.value === 'Scanning...') modelSelect.innerHTML = `<option value="" disabled selected>Scanning... (Retrying)</option>`;
+                await new Promise(r => setTimeout(r, 2000));
+                return fetchModels(retries - 1);
+            }
+            if (remembered) ensureOption(remembered); // offline but we know a model — keep it usable
+            else modelSelect.innerHTML = '<option value="" disabled selected>Error Loading Models</option>';
+        }
+        return;
+    }
     try {
         // LM Studio / OpenAI Format (Primary UI backend in v39.4)
         // --- v48: add timeout so model list probing doesn't hang forever on slow networks/mobile.
@@ -1961,9 +2076,15 @@ async function fetchModels(retries = 3) {
 // Remember the chosen model so chat survives an LM Studio JIT/empty model list and restarts.
 modelSelect.addEventListener('change', () => {
     try { if (modelSelect.value) localStorage.setItem('agentsmith_last_model', modelSelect.value); } catch {}
+    // v56.4: remember per-provider too, so switching BACK to Ollama restores the last
+    // Ollama model even if the LM Studio selection differs.
+    try { if (modelSelect.value && activeProvider === 'ollama') localStorage.setItem('agentsmith_last_model_ollama', modelSelect.value); } catch {}
     // v52.2: an explicit pick from the dropdown wins over the "follow LM Studio's
     // loaded model" default for the rest of this session (until the URL changes).
     if (modelSelect.value && modelSelect.value !== 'Scanning...') userPickedModel = true;
+    // v56.4: Ollama has no management API — its engine loads the model on demand, so
+    // there is nothing to swap/unload here.
+    if (activeProvider === 'ollama') return;
     // v52.5: a pick is now an IMMEDIATE swap — unload every other loaded LLM and load
     // the selection, so the dropdown always matches what's actually in VRAM.
     handleModelSwap();
@@ -2095,6 +2216,11 @@ if (unloadAllBtn) {
 
     unloadAllBtn.addEventListener('click', async () => {
         if (unloadingAll) return; // one in-flight at a time — unloads are sequential in main anyway
+        // v56.4: UNLOAD ALL drives LM Studio's management API + lms CLI — Ollama has neither.
+        if (activeProvider === 'ollama') {
+            addMessage('system', '**UNLOAD ALL** is an LM Studio feature — it frees models via LM Studio\'s management API. Switch the PROVIDER to LM Studio first, or stop Ollama (`ollama stop <model>` / `systemctl restart ollama`) to free VRAM.');
+            return;
+        }
         setUnloadBusy(true);
         let res = null;
         try {
@@ -2196,7 +2322,11 @@ async function checkHardwareHealth() {
 }
 
 async function checkConnection() {
-    const endpoint = `${effectiveApiBase()}/v1/models`;
+    // v56.4: probe the ACTIVE provider's model-list endpoint — LM Studio exposes
+    // OpenAI's /v1/models, Ollama exposes native /api/tags (no /v1 on stock builds).
+    const endpoint = activeProvider === 'ollama'
+        ? `${effectiveApiBase()}/api/tags`
+        : `${effectiveApiBase()}/v1/models`;
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout for health check
@@ -3385,8 +3515,9 @@ My Query: ${text}`;
                     });
                 }
             } else {
-                // Ollama Format
-                endpoint = `${currentApiBase}/chat`;
+                // v56.4: Ollama Format — native /api/chat on the ACTIVE provider's base
+                // (was hardcoded to currentApiBase, which only ever held LM Studio's URL).
+                endpoint = `${effectiveApiBase()}/api/chat`;
                 
                 // Deep copy chatHistory to inject transient context
                 const messagesForOllama = payloadHistory.map(m => {
@@ -3524,7 +3655,9 @@ My Query: ${text}`;
                 // a context overflow says "lower the context slider", a load failure says
                 // "pick a model that fits VRAM" — never a raw engine dump the user can't act on.
                 const classified = window.XKStreamSignals?.classifyHttpError?.({ status: res.status, body: errorText });
-                if (classified && classified.isContextOverflow && !ctxAutoExpanded) {
+                // v56.4: the auto-expand guardrail is LM Studio-only — it reloads the model
+                // through LM Studio's management API (lms CLI), which Ollama does not have.
+                if (classified && classified.isContextOverflow && !ctxAutoExpanded && activeProvider !== 'ollama') {
                     // v55.8: LIMITLESS RESEARCH BUDGET — the prompt outgrew LM Studio's loaded
                     // context window MID-RUN (deep-research reports are big by design). Instead of
                     // ending with "lower your context slider", expand the window to the model's

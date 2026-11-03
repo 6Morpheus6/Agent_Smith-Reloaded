@@ -33,7 +33,7 @@
             <div class="as-brand">
                 <span id="resource-status-dot" class="status-dot" title="Resource Status: Healthy"></span>
                 <h1 class="as-wordmark" data-text="AGENT SMITH RELOADED">AGENT SMITH RELOADED</h1>
-                <span id="app-version" class="as-version">v56.4.0</span>
+                <span id="app-version" class="as-version">v56.5.0</span>
             </div>
             <div class="as-subline">
                 <span class="as-tag">SYSTEM&nbsp;AGENT&nbsp;·&nbsp;LOCAL</span>
@@ -75,9 +75,10 @@
                     </select>
                 </label>
                 <!-- v52.3: UNLOAD ALL — one click frees every model currently loaded in
-                     LM Studio (VRAM back to zero). Runs against the local management API
-                     via main-process IPC, so it works from desktop and mobile web alike. -->
-                <button type="button" id="unload-all-btn" class="ctx-row ctx-unload" title="Unload every model currently loaded in LM Studio — frees VRAM">
+                     LM Studio AND Ollama (VRAM back to zero; embedding models like
+                     all-minilm are kept — memory infrastructure). Runs in the main
+                     process via IPC, so it works from desktop and mobile web alike. -->
+                <button type="button" id="unload-all-btn" class="ctx-row ctx-unload" title="Unload every model currently loaded in LM Studio and Ollama — frees VRAM (the all-minilm embedding model is kept)">
                     <span class="ctx-ico" aria-hidden="true">⏏</span>
                     <span class="ctx-unload-label">UNLOAD ALL MODELS</span>
                 </button>

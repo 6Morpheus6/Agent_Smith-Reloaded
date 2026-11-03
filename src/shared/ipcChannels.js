@@ -34,6 +34,9 @@ const INVOKE_CHANNELS = [
     // v52.5: model swap (dropdown pick → unload others + load selection) and the
     // startup embedding-model guarantee for memory recall.
     'lmstudio-swap-model', 'lmstudio-ensure-embedding',
+    // v56.5: Ollama unloading — UNLOAD ALL frees Ollama models too, and a dropdown pick
+    // stops every other resident Ollama model (embeddings stay protected).
+    'ollama-unload-all', 'ollama-unload-others',
     'auth-login', 'auth-register', 'auth-check', 'auth-logout', 'auth-has-users',
     'auth-get-users', 'auth-update-user',
     'plugins-list', 'plugins-get-contributions', 'plugin-invoke-tool',

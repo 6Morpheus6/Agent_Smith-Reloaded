@@ -81,6 +81,18 @@ test('LM Studio context-overflow body is classified with an actionable message',
     assert.match(r.message, /context window/i);
 });
 
+test('Ollama overflow payloads are classified too (v56.5 — both known shapes)', () => {
+    // Local post-#16712 Ollama wraps llama-server's error inside {"error":"…"}:
+    const wrapped = '{"error":"{\"error\":{\"code\":400,\"message\":\"request (351 tokens) exceeds the available context size (256 tokens), try increasing it\",\"type\":\"exceed_context_size_error\",\"n_prompt_tokens\":351,\"n_ctx\":256}}"}';
+    const r = classifyHttpError({ status: 400, body: wrapped });
+    assert.equal(r.isContextOverflow, true);
+    assert.match(r.message, /context window/i);
+    // The other known Ollama phrasing ("prompt too long…") must classify as well:
+    const r2 = classifyHttpError({ status: 400, body: '{"error":"prompt too long; exceeded max context length by 1493 tokens"}' });
+    assert.equal(r2.isContextOverflow, true);
+    assert.match(r2.message, /context window/i);
+});
+
 test('model-load failures get their own message', () => {
     const r = classifyHttpError({ status: 500, body: 'failed to load model: out of memory' });
     assert.equal(r.isContextOverflow, false);

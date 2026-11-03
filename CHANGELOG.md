@@ -1,5 +1,282 @@
 # Agent Smith Changelog
 
+## [56.5.0] - 2026-11-02 — 🪟 Ollama gets a bounded window (last 20 messages) + a self-renewing 8-minute lease
+
+> Numbering note: this entry was written as **56.6.0** during development, but that
+> version was never pushed — the whole line (including the two 56.5.0 entries below)
+> ships as a single **56.5.0**, so the number is folded back again. It also supersedes
+> the lease *values* described in those earlier drafts: what ships is the self-renewing
+> 8-minute lease documented here, not the `'1h'`/`'5m'` mix.
+
+Every chat/agent run on the Ollama provider now sends **only the system prompt plus the
+last 20 messages of the conversation**, instead of the whole accumulated history. The
+chat in the UI is untouched — every message stays visible and persisted; only the payload
+is bounded. The motivation: long-running conversations kept shipping ever more old
+turns (and their base64 attachments) to Ollama, growing the prompt until it hit the
+per-request `num_ctx` and tripped the v56.5 overflow guard. Bounding the window up front
+makes that guard the exception it was designed to be rather than the normal path.
+
+### What changed (`src/renderer/app.js`)
+
+- **New `OLLAMA_PAYLOAD_TAIL = 20`** constant next to `pruneOllamaOverflow()`.
+- **Proactive cap at run start** — right after `payloadHistory` is cloned from
+  `chatHistory` (and *before* `ollamaRunStartLen` is captured), an Ollama run passes the
+  clone through `pruneOllamaOverflow(payloadHistory, 20)`: keep the system prompt, drop
+  everything older than the last 20 messages, never start the window on an orphaned tool
+  result. Only the CLONE is cut — `chatHistory` / `histories[mode]` (what the UI renders
+  and `persist()` snapshots) keeps every message.
+- **The current run is never touched** — the cap is applied once, before the loop, so the
+  exchange this run generates is appended *after* the window and stays complete: the user
+  question, assistant answers, tool calls/results, nudges and guard-rail additions are
+  all still sent in full. (Re-capping per turn would eventually cut the user's own
+  question out of a long tool run — exactly what must not happen.)
+- **The v56.5 overflow guard is unchanged and still applies** — if system + the 20-message
+  window + the running exchange still exceed `num_ctx`, `recoverOllamaOverflow()` does
+  its two-stage trim + retry exactly as before. `ollamaRunStartLen` now counts from the
+  capped window, so its "run's own exchange" floor stays accurate.
+- **LM Studio untouched** — the cap is gated on `activeProvider === 'ollama'`; the
+  OpenAI-compatible branch sends the same payload as before.
+- A console line (`[CONTEXT] Ollama payload capped …`) reports the old → new size when a
+  cap actually bit; no chat receipt is posted, so repeated messages don't spam the UI.
+- **A self-renewing 8-minute lease: loaded for the WHOLE app session, never stuck** —
+  new constants `OLLAMA_LEASE = '8m'` + `OLLAMA_HEARTBEAT_MS` (4 min) replace three
+  different positive `keep_alive` values that all meant "the same thing" and produced
+  three different timers in `ollama ps`: the **chat body** (was `'1h'` — the ~60-minute
+  "59 minutes from now" a user saw after using a model; it was only ever a safety net for
+  a run-end release that never fired, and no error was involved),
+  **`releaseOllamaLock()`** at run end (was `'5m'` — the "3 minutes from now" left on a
+  ticking 5-minute lease), and the **boot self-heal + `pagehide` hooks** (both `'5m'`).
+  The requested behavior is "loaded until the app exits or the model changes" — a single
+  value cannot do that safely (a hard kill skips every exit hook, which is exactly how
+  `keep_alive:-1` used to pin a model to the year 2319), so the 8 minutes are a SAFETY
+  WINDOW that a heartbeat renews every 4 minutes while the page is alive: long thinking
+  steps, slow tool runs and however long the user takes to type the next message never
+  unload the model, and only a living page ever renews it — so once the app is gone the
+  window runs out and Ollama frees the model by itself (≤8 min after a hard kill; a clean
+  exit frees it immediately, because `pagehide` now sends `keep_alive: 0`). While the app
+  runs, `ollama ps` counts down from ≤8 minutes and jumps back up every ~4 minutes — it
+  never reaches 3 or 59 again. Unload paths (`keep_alive: 0`) and the embedding lease in
+  `memory.js` are untouched.
+- **Lease renewals carry the chat's OWN options — they never re-init the runner** — the
+  new shared helper `ollamaChatOptions()` (`temperature` + `num_ctx` from the TUNING
+  sliders) is now used by BOTH the chat body and `releaseOllamaLock()`'s renewal
+  (heartbeat, boot self-heal, run end). Measured against a live Ollama 0.40.13: an
+  options-less renewal makes Ollama re-init the runner to its defaults (`num_ctx` 65536 —
+  a multi-second unload+reload with a VRAM spike, `done_reason:"load"`), and the next
+  question (slider `num_ctx`) re-inits it back — so EVERY question used to start with a
+  full VRAM unload+reload (the observed "VRAM is emptied first, then reloaded, then the
+  answer") while every 4-minute heartbeat did the same silently. With identical options a
+  renewal takes 0.005 s and restarts nothing (a temperature-only change never restarts;
+  only `num_ctx` does). `keep_alive:0` unload paths (pagehide, ⏏ UNLOAD ALL, swaps) stay
+  options-less on purpose — Ollama skips runner prep for them (0.004 s with or without
+  options).
+
+### Verification
+
+- `node --check src/renderer/app.js` ✅
+- `node --test tests/chatReplyIntegrity.test.js tests/rendererLoadOrder.test.js
+  tests/researchBudget.test.js tests/webSearchDisplay.test.js
+  tests/webSearchFallback.test.js tests/rendererBundleBrowserSafe.test.js
+  tests/ollamaManager.test.js` → **64/64 pass** (all tests that read
+  `src/renderer/app.js` source, plus the Ollama manager suite).
+- After the lease change: `node --check src/renderer/app.js` ✅ and the same focused
+  `node --test` set (minus the two web-search files) → **34/34 pass**.
+- Live-verified THIS session against the machine's Ollama 0.40.13 (using
+  `llama3.2:latest`, unloaded again afterwards): options-less renewal → runner re-init to
+  `num_ctx` 65536 in 2.75 s (2.6 GB → 9.8 GB); renewal carrying the chat's options →
+  0.005 s with `CONTEXT` unchanged and `UNTIL` re-armed; temperature-only change →
+  0.033 s (no restart); `keep_alive:0` unload → 0.004 s with or without options.
+- After the lease-options fix: `node --check src/renderer/app.js` ✅ and the same 7-file
+  `node --test` set → **64/64 pass**.
+- NOT verified live with the real model/app — worth three manual checks on the machine:
+  (a) a chat longer than 20 messages, with the devtools console showing the
+  `[CONTEXT] Ollama payload capped …` line and the reply still using the earlier context
+  it needs; (b) `ollama ps` while the app sits idle for >10 minutes — expect `UNTIL` to
+  count down from ≤8 minutes and jump back up every ~4 minutes (the heartbeat) instead of
+  reaching zero, then the model gone within 8 minutes of stopping Agent Smith (immediately
+  after a clean window close); (c) ask a question after >8 min of idle — it must answer
+  WITHOUT the VRAM emptying first, with `ollama ps` showing `CONTEXT` at the slider value
+  throughout.
+
+## [56.5.0] - 2026-11-01 — 🔒 Finite Ollama lease (no model can stay resident forever) + context-overflow recovery
+
+Launcher report (Pinokio), two findings after the previous session's fixes went live:
+
+1. **"LM Studio first, then switch to Ollama" left the Ollama model resident FOREVER.**
+   Using only Ollama freed the model ≤5 min after Agent Smith stopped, but loading an
+   LM Studio model first and then flipping the PROVIDER ended with the Ollama chat model
+   pinned (`/api/ps` with no usable expiry). The switch command itself was clean — swap
+   paths only ever send `keep_alive: 0` — the `-1` came from the chat body, and the
+   run-end release was best-effort with a NAME check: `releaseOllamaLock()` re-armed only
+   the model the *dropdown* pointed at, and only when `GET /api/ps` matched that name.
+   Any missed release (selection vs resident mismatch, tab closed, app killed mid-run,
+   failed probe) left `keep_alive: -1` in force — and `-1` never expires, so NOTHING
+   could ever heal it afterwards.
+2. **A context-window error with an Ollama model was permanently sticky.** Retrying
+   returned the same error instantly; unloading the model and restarting Agent Smith
+   changed nothing. Root cause: newer Ollama (ollama/ollama#16712) HARD-FAILS
+   `POST /api/chat` with HTTP 400 `exceed_context_size_error` — "request (N tokens)
+   exceeds the available context size (M tokens), try increasing it" — once the prompt
+   exceeds the per-request `num_ctx` (the Context Window slider), where older builds
+   silently truncated. The inputs that decide the overflow — the persisted conversation,
+   the slider value, the system prompt — survive model unloads and app restarts, every
+   failed attempt LEAVES its user message in the history (so the payload grows), and the
+   v55.8 auto-expand guardrail is explicitly LM Studio-only — so every retry reproduced
+   the identical error *by design*.
+
+### What changed (`src/renderer/app.js`, `src/shared/streamSignals.js`, `src/shared/retryPolicy.js`)
+
+- **Finite generation lease** — the Ollama chat body ships `keep_alive: "1h"` instead of
+  `-1`. Every request re-arms it, so a multi-turn run still can't lose its model
+  mid-task; but if NO release ever runs (tab closed, launcher stopped, crash), Ollama
+  itself frees the model ≤1 h after the last request instead of holding it to the year
+  2319. The immortal lease was the only mechanism that could make "forever" possible —
+  every failure mode now self-bounds.
+- **Release every resident model, not just the selection** — `releaseOllamaLock()` reads
+  `GET /api/ps` and re-arms **every resident non-embedding chat model** to
+  `keep_alive: "5m"` (name-independent — the old selection-vs-resident name check is
+  gone; embedding models keep their memory.js lease via a mirrored `EMBED_NAME_HINT`).
+  Same official contract as before (empty messages + positive lease); 8 s budget; one
+  model failing never blocks the rest. Signature gained an optional base so the boot
+  hook below can target Ollama even while another provider is selected.
+- **Two self-heal hooks** — on **boot** (4 s after init, any active provider) and on
+  **pagehide** (tab close/reload, even mid-run, via `fetch(..., { keepalive: true })`
+  re-arming the model this page last leased). A stuck lease from a killed session is
+  handed back to the 5-minute window on the very next start or tab close.
+- **Ollama context-overflow recovery** (new `recoverOllamaOverflow()` +
+  `pruneOllamaOverflow()`) — on a classified overflow while the Ollama provider is
+  active, the run trims the payload instead of dying: keep the system prompt + the run's
+  own exchange (≥6 messages, then ≥2 on a second pass — never cutting into the exchange
+  in flight, never starting the window on an orphaned tool result) and retry the same
+  turn. The durable history is compacted in place by the same amount
+  (convo/chatHistory/histories[mode] are one array) so the NEXT message doesn't pay the
+  overflow again — the rendered view keeps every message because `persist()` snapshots
+  the DOM. The first trim posts a ✂️ receipt. When even system prompt + tool schemas +
+  the current turn don't fit, the error is now actionable **for Ollama**: raise the
+  Context Window slider (num_ctx applies on the very next request — no reload needed) or
+  clear the chat — instead of the old LM-Studio-flavored "reload LM Studio" advice.
+- **Broader overflow classification** — `streamSignals.classifyHttpError` and
+  `retryPolicy.FATAL_PATTERNS` now also match Ollama's second known phrasing
+  (`prompt too long` / `exceeded max context length` / `context length exceeded`), so
+  that shape classifies as a permanent context overflow (actionable message, no wasted
+  auto-retry) instead of surfacing as a raw payload.
+- **Version** — the whole 56.4.0 → 56.5.0 line ships as **56.5.0** (the interim 56.6.0
+  numbering below was folded back at the user's request); `package.json`,
+  `#app-version` and the README badge now read v56.5.0.
+
+### Verification
+
+- `node --check src/renderer/app.js` ✅
+- `node --test tests/researchBudget.test.js tests/rendererLoadOrder.test.js
+  tests/rendererBundleBrowserSafe.test.js tests/ollamaManager.test.js
+  tests/streamSignals.test.js tests/retryPolicy.test.js tests/ctxGate.test.js
+  tests/chatReplyIntegrity.test.js tests/stallRetry.test.js
+  tests/webSearchDisplay.test.js tests/webSearchFallback.test.js` → **100/100 pass**
+  (includes the new Ollama-shape classify cases and the new fatal-retry case; the
+  researchBudget wiring guards still find the LM Studio auto-expand block intact).
+- `node scripts/build-renderer.js` rebuilt `dist/renderer/bundle.js` with the new
+  classification and synced `#app-version` / README → **v56.5.0**.
+- NOT verified live this session: no Ollama/LM Studio instance was driven from here —
+  the lease behavior should be re-checked on the machine with `GET /api/ps` after a run
+  (expect `expires_at` ≈ now + 5 min) and after a mid-run tab close (same).
+
+## [56.5.0] - 2026-11-01 — Ollama freed ≤5 min after Agent Smith stops + cross-provider auto-unload
+
+> Numbering note: this entry was originally written as **56.6.0** during development; at
+> the user's request the entire 56.4.0 → 56.5.0 line ships as **56.5.0**, so the interim
+> number was folded back (the body below is unchanged).
+
+Launcher report (Pinokio): two of the three v56.5 gaps were still open. (1) Stopping Agent
+Smith did NOT free the Ollama chat model — not even after 5 minutes — and (2) loading a
+model through one backend never unloaded the OTHER backend's model, so Ollama and LM Studio
+sat resident side by side.
+
+Root cause of (1): every Ollama chat request ships `keep_alive: -1` (the v37.2 "Active
+Generation Lock") and Ollama honors that lease literally — `GET /api/ps` showed
+`expires_at` in the year **2319**, so Ollama's default 5-minute keep-alive never applied to
+it. v56.5's one-shot launcher pre-load was correct but irrelevant: the app itself re-armed
+an immortal lease on every message.
+
+### What changed
+- **The generation lock expires again** (`src/renderer/app.js`, new `releaseOllamaLock()`)
+  — it runs at every chat-run end (success, error and STOP all pass through the same
+  `finally`), reads `GET /api/ps` and, only if the selected model is actually RESIDENT,
+  re-arms it with the documented lease contract (`POST /api/chat`, empty messages,
+  `keep_alive: "5m"`). The `keep_alive:-1` lock still covers the WHOLE run, so a
+  multi-turn loop can never lose its model mid-task; the moment the run ends the lease is
+  handed back, so Ollama frees the model ≤5 min later — i.e. ≤5 min after Agent Smith is
+  stopped, with no client attached. The `/api/ps` guard means a run that never reached
+  inference can't accidentally LOAD a model.
+- **New cross-provider free** (`freeOtherBackend()` / `freeOtherBackendAtSafeBoundary()`):
+  the PROVIDER dropdown switch AND a model pick on either side now free the INACTIVE
+  backend first — `ollama-unload-all` when LM Studio became active, `lmstudio-unload-all`
+  when Ollama did — through the same IPC as ⏏ UNLOAD ALL, so embeddings (all-minilm) stay
+  protected on both sides. It queues behind an in-flight run (the backend a generation is
+  talking to is never freed mid-stream) and flushes at the next safe boundary, exactly like
+  the model swaps. A chat receipt appears only when something was actually freed; "backend
+  not running" stays a console warning.
+
+### Verification
+- Live `GET /api/ps` before/after a `keep_alive:"5m"` release: `expires_at` moved from
+  `2319-02-11` to now + 5 min — the exact contract the renderer now issues on every run end.
+- `node --test tests/ollamaManager.test.js tests/lmStudioManager.test.js
+  tests/lmStudioIpc.test.js tests/rendererLoadOrder.test.js
+  tests/rendererBundleBrowserSafe.test.js` → 55/55 pass. No test file references
+  `src/renderer/app.js`; the full `npm test` run keeps pre-existing environment failures
+  unrelated to this change (whatsappChrome expects Chrome to be absent, cloudflareTunnel,
+  imageGen, piper/TTS).
+
+## [56.5.0] - 2026-11-01 — ⏏ UNLOAD ALL frees Ollama too (all-minilm protected) + Ollama model swaps
+
+Launcher report (Pinokio, low-VRAM config with BOTH backends running): two related gaps around
+Ollama. (1) After Agent Smith was stopped, the Ollama chat model stayed resident — the launcher's
+`start_model.js` used the INTERACTIVE `ollama run gemma4:latest`, leaving a CLI client attached to
+the Ollama server that could outlive the launcher stop; and nothing in the app could free the model
+on demand either. (2) The ⏏ UNLOAD ALL button only knew LM Studio — it refused outright while the
+PROVIDER was Ollama ("Ollama has neither" a management API), so Ollama models could never be freed
+from the UI. Related: picking a new Ollama model left the previous one resident too (JIT load +
+keep-alive = both in VRAM).
+
+### What changed
+- **New `src/main/services/ollamaManager.js`** — Ollama unloading in the main process, loopback
+  only (same philosophy as lmStudioManager): reads the live resident list from GET `/api/ps`, then
+  frees each model with the OFFICIAL unload contract — POST `/api/chat` with an EMPTY messages
+  array and `keep_alive: 0` (exactly what `ollama stop <model>` does, no CLI on PATH needed). One
+  unload per model; a single failure never aborts the rest; "not found" races count as success.
+  Embedding models (the shared `EMBED_NAME_HINT`, now exported from lmStudioManager) are
+  PROTECTED — all-minilm is memory infrastructure and survives every unload/swap.
+- **New IPC channels** `ollama-unload-all` + `ollama-unload-others` (`src/shared/ipcChannels.js`,
+  handler domain `src/main/ipc/ollama.js`, service wired in `main.js`). Works from desktop and
+  mobile web through the existing preload bridge / `/api/invoke` proxy.
+- **⏏ UNLOAD ALL now frees BOTH backends** (`src/renderer/app.js`, `index.html`) — the v56.4 Ollama
+  refusal is gone. One click unloads LM Studio instances AND stops Ollama's resident models,
+  regardless of which provider is active (each backend's URL is read from its own CONNECT field).
+  Every backend reports honestly in the chat receipt (unloaded / nothing loaded / not reachable /
+  remote endpoint), and protected embedding models are named ("kept embedding …").
+- **Ollama model swaps** (`src/renderer/app.js`) — picking a model from the dropdown while the
+  Ollama provider is active now IMMEDIATELY stops every other resident Ollama model via
+  `ollama-unload-others` (the pick itself stays resident; embeddings stay). Same busy-queueing as
+  the v52.5 LM Studio swap: a pick made during a run queues and flushes at the next safe boundary.
+- **`lmStudioManager.unloadAll()` protects embedding instances** (type `embedding` or the name
+  heuristic) and reports them in a new `protected` field — UNLOAD ALL no longer kills all-minilm's
+  LM Studio instance either (swapModel already had this rule; UNLOAD ALL was the gap).
+- **Launcher (`start_model.js`)** — the Ollama pre-load is now ONE-SHOT
+  (`ollama run gemma4:latest "ready"` — prompt arg → the CLI runs once and exits) instead of the
+  interactive session that stayed attached. With no client attached, Ollama frees the model via
+  its default keep-alive (≤5 min) once Agent Smith is stopped; the UNLOAD ALL button frees it
+  immediately.
+
+### Tests
+- `tests/ollamaManager.test.js` (new, 17) — the /api/ps → empty-messages keep_alive:0 unload
+  contract (one POST per resident model, exact endpoint + body); embedding protection; keepModel
+  swap semantics incl. `:latest` tag normalization; nothing-loaded success; remote endpoints
+  refused without a network call; unreachable degrades to a warning; per-model failure reporting;
+  the not-found race; channel whitelist + both IPC handlers (forwarded args only, throwing manager
+  degrades honestly, no-op without the service).
+- `tests/lmStudioManager.test.js` (+2) — unloadAll keeps typed AND name-heuristic embedding
+  instances resident; an only-embedding load frees nothing. Existing unloadAll tests unchanged
+  (their payloads contain no embedding models).
+
 ## [56.3.0] - 2026-10-22 — 🔧 Native-binary doctor now covers sharp (self-healing "sharp module missing")
 
 User report: the terminal showed a "sharp module missing" error after updating, and it was

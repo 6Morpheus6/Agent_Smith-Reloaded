@@ -423,6 +423,21 @@ function effectiveApiBase() {
     }
     return currentApiBase;
 }
+// v56.5: both backends' bases regardless of the ACTIVE provider — UNLOAD ALL frees LM
+// Studio AND Ollama (both servers may run side by side on low-VRAM configs), so the
+// inactive backend's URL field must be reachable too.
+function lmsApiBase() {
+    if (activeProvider !== 'ollama') return effectiveApiBase();
+    let u = lmsServerInput ? lmsServerInput.value.trim() : '';
+    if (!u) u = currentApiBase || 'http://127.0.0.1:1234';
+    return u.replace(/\/+$/, '');
+}
+function ollamaApiBase() {
+    if (activeProvider === 'ollama') return effectiveApiBase();
+    let u = ollamaServerInput ? ollamaServerInput.value.trim() : '';
+    if (!u) u = 'http://127.0.0.1:11434';
+    return u.replace(/\/+$/, '');
+}
 function activeApiKey() { return 'lm-studio'; }
 function activeModel() {
     return modelSelect?.value;
@@ -1013,6 +1028,9 @@ if (providerSelect) {
         userPickedModel = false; // new backend — resume default model-following
         // A queued LM Studio swap must not fire against the NEW provider's URL later.
         pendingModelSwap = null;
+        // v56.5: switching providers frees the backend we just LEFT — one chat model in
+        // VRAM at a time. Queued while a run still talks to it, flushed at run end.
+        freeOtherBackendAtSafeBoundary();
         notifyHostBackend();
         fetchModels();
         checkConnection();
@@ -1057,6 +1075,67 @@ function syncKimiK3UI() {
 syncProviderUI();
 syncKimiK3UI();
 updateApiBase();
+
+// v56.5: THE ONE OLLAMA LEASE — every positive keep_alive in this file uses it.
+// 8 minutes is the SAFETY WINDOW, not the resting state: while this page is alive a
+// heartbeat (see below) re-arms every resident chat model every 4 minutes, so the model
+// stays loaded for the WHOLE app session — through a long thinking step, a slow tool
+// run, and however long the user takes to type the next message. That is the requested
+// behavior ("loaded until the app exits or the model changes") WITHOUT the old
+// keep_alive:-1 trap: only a living page renews the lease, so the window is always the
+// worst case once the app is gone — a clean exit frees the model immediately (pagehide
+// sends keep_alive: 0) and a hard kill (launcher stop, no pagehide) frees it by itself
+// ≤8 min later instead of pinning it to the year 2319. Replaces the old mix: chat body
+// '1h' (the ~60-minute timer in `ollama ps`) and '5m' run-end/boot/pagehide releases
+// (the "3 minutes from now" reading). Unload paths (keep_alive: 0) and the embedding
+// lease in memory.js are unaffected.
+const OLLAMA_LEASE = '8m';
+// Renewal cadence: half the window, so even a late tick can never let the model expire
+// while the page is alive.
+const OLLAMA_HEARTBEAT_MS = 4 * 60 * 1000;
+
+// v56.5: OLLAMA LEASE SELF-HEAL + SESSION HOLD — On BOOT, re-arm whatever is
+// resident (regardless of the active provider — a lease left behind by a hard kill
+// survives provider switches) so a leftover model joins the normal 8-minute window.
+// On PAGEHIDE (tab close / reload / window exit, even mid-run) the session ends, so the
+// model is freed NOW with keep_alive: 0 — the requested "loaded until the app exits" —
+// sent with `keepalive` so the request outlives the page teardown. If that request is
+// lost, the last heartbeat's OLLAMA_LEASE window still frees the model ≤8 min later.
+// The HEARTBEAT below is what holds the model for the whole session.
+setTimeout(() => {
+    try {
+        const rel = releaseOllamaLock(ollamaApiBase());
+        if (rel && rel.catch) rel.catch(() => {});
+    } catch (e) { /* best-effort */ }
+}, 4000);
+window.addEventListener('pagehide', () => {
+    try {
+        if (activeProvider !== 'ollama') return;
+        const model = lastOllamaLeaseModel || (modelSelect && modelSelect.value);
+        if (!model || model === 'Scanning...') return;
+        fetch(`${effectiveApiBase()}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, messages: [], keep_alive: 0 }),
+            keepalive: true
+        }).catch(() => {});
+    } catch (e) { /* page is going away — best effort only */ }
+});
+// v56.5: LEASE RENEWAL — the piece that makes "the model stays loaded as long as the
+// app is open" true without a forever-lease: every OLLAMA_HEARTBEAT_MS the resident
+// chat models are re-armed to OLLAMA_LEASE through the same official contract as the
+// run-end release (/api/ps → empty messages + the chat's OWN options (ollamaChatOptions)
+// → positive keep_alive — carrying them keeps the renewal from re-initing the runner to
+// Ollama's defaults, which would make the next question unload+reload; embeddings stay
+// untouched and other providers are skipped by releaseOllamaLock itself). Because only
+// a living page ever renews it, the 8-minute window remains the absolute worst case
+// once the app is gone — no stuck model, ever. Best-effort, fire-and-forget.
+setInterval(() => {
+    try {
+        const rel = releaseOllamaLock();
+        if (rel && rel.catch) rel.catch(() => {});
+    } catch (e) { /* best-effort */ }
+}, OLLAMA_HEARTBEAT_MS);
 
 let attachedFiles = [];
 let abortController = null;
@@ -1500,6 +1579,143 @@ function renderAttachments() {
 if (ctxVal && ctxSlider) ctxVal.textContent = ctxSlider.value;
 
 // --- Memory helpers ---
+// --- v56.5: OLLAMA LEASE — a FINITE generation lock that can always be released -----
+// Every Ollama chat request carries a keep-alive lease. It used to be keep_alive:-1 (the
+// v37.2 "Active Generation Lock"), which Ollama honors LITERALLY — `GET /api/ps` showed
+// expires_at in the year 2319 — so a lease nobody released (tab closed, launcher stopped,
+// app killed mid-run, or the run-end release failing its name check) kept the model
+// resident FOREVER. "LM Studio first, then switch to Ollama" made that likely because the
+// selected name and the resident name could disagree. Three changes close the hole:
+//   1. the chat body ships the FINITE OLLAMA_LEASE ('8m', declared above the self-heal
+//      hooks) — every request re-arms it, so no single request can ever pin the model;
+//   2. while the page is alive a heartbeat renews that same lease every 4 min, so the
+//      model STAYS loaded for the whole app session (long thinking, slow tool steps,
+//      time to reply) — and because only a living page renews it, Ollama frees the model
+//      ≤8 min after the app is gone even if NO release ever runs;
+//   3. releaseOllamaLock() hands EVERY resident chat model back to that same OLLAMA_LEASE
+//      at each run end and on boot, while pagehide unloads the model outright
+//      (keep_alive: 0) — see the self-heal hooks at init.
+// Only RESIDENT models are touched, so a run that never reached inference can't LOAD one.
+// Embedding models are skipped: their lease belongs to memory.js (same rule as every
+// unload/swap on both backends).
+const OLLAMA_EMBED_NAME_HINT = /embed|minilm|bge|nomic|gte|e5|sentence/i; // mirror of lmStudioManager.EMBED_NAME_HINT — keep in sync
+let lastOllamaLeaseModel = ''; // the model this page last put a lease on (for pagehide)
+
+// v56.5: THE options every Ollama request must agree on. The chat body sends
+// { temperature, num_ctx } from the TUNING sliders; the lease renewal below ships the
+// SAME object. Proven against Ollama 0.40.13: a request WITHOUT options makes Ollama
+// re-init the runner to its defaults (num_ctx 65536 — a multi-second unload+reload with
+// a VRAM spike), and the next chat request (slider num_ctx) re-inits it back — so every
+// QUESTION started with a full VRAM unload+reload while every heartbeat renewal did the
+// same silently. Identical options = no restart at all (0.005 s vs ~3 s); a temperature
+// change alone never restarts, only num_ctx does. keep_alive:0 unload requests are
+// exempt — Ollama skips runner prep for them (0.004 s even without options).
+function ollamaChatOptions() {
+    return { temperature: parseFloat(tempSlider.value), num_ctx: parseInt(ctxSlider?.value || 8192, 10) };
+}
+
+async function releaseOllamaLock(baseOverride) {
+    // Run-end calls pass nothing → only the ACTIVE Ollama backend is touched. The boot
+    // self-heal passes ollamaApiBase() explicitly so a stuck lease is re-armed even while
+    // another provider is selected.
+    const base = baseOverride || (activeProvider === 'ollama' ? effectiveApiBase() : null);
+    if (!base) return false;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    try {
+        const psRes = await fetch(`${base}/api/ps`, { signal: controller.signal });
+        if (!psRes.ok) return false;
+        const ps = await psRes.json();
+        const resident = (Array.isArray(ps && ps.models) ? ps.models : [])
+            .map(m => (m && (m.name || m.model)) || '').filter(Boolean)
+            .filter(n => !OLLAMA_EMBED_NAME_HINT.test(n));
+        if (resident.length === 0) return false; // nothing loaded → nothing to release
+        // Official lease contract: empty messages + positive keep_alive re-arms expires_at.
+        // EVERY resident chat model is re-armed, not just the dropdown's selection: the lock
+        // may sit on a model the selection no longer points at — that mismatch is exactly how
+        // a lease used to survive the run end that should have freed it.
+        let released = 0;
+        for (const m of resident) {
+            try {
+                await fetch(`${base}/api/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    // v56.5: SAME options as the chat body (ollamaChatOptions) — an
+                    // options-less renewal re-inits the runner to Ollama's defaults
+                    // (num_ctx 65536) and the next question re-inits it back, i.e. a
+                    // full unload+reload on every question. Matching options re-arm the
+                    // lease with NO restart (measured 0.005 s).
+                    body: JSON.stringify({ model: m, messages: [], keep_alive: OLLAMA_LEASE, options: ollamaChatOptions() }),
+                    signal: controller.signal
+                });
+                released++;
+            } catch (e) { /* one model failing never blocks the rest */ }
+        }
+        return released > 0;
+    } catch (e) {
+        console.warn('[LOCK] Ollama keep-alive release failed:', e.message);
+        return false;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
+// v56.5: OLLAMA PAYLOAD CAP — how many NON-system messages of the conversation a run
+// hands to Ollama at start: only the last N are carried over (system prompt always stays).
+// This trims the CLONE (payloadHistory) only — chatHistory / histories[mode], which the
+// UI renders and persist() snapshots, keeps every message. Applied once per run BEFORE
+// ollamaRunStartLen is captured, so the overflow guard's "run's own exchange" math counts
+// from the capped window; messages this run generates are appended after it and are never
+// cut here. If system + cap + the run's own exchange still overflow num_ctx,
+// recoverOllamaOverflow() below keeps doing its two-stage trim + retry. LM Studio is
+// untouched by design — its context is managed by the backend, not by this cap.
+const OLLAMA_PAYLOAD_TAIL = 20;
+
+// v56.5: OLLAMA OVERFLOW TRIM — keep the system prompt + the last `minTail` messages,
+// drop everything older, and never START the window on an orphaned tool result (its
+// assistant tool_calls message was cut — Ollama rejects a tool message with no call).
+// Returns the SAME array when nothing can be trimmed, so callers detect "no progress"
+// and stop instead of looping.
+function pruneOllamaOverflow(history, minTail) {
+    if (!Array.isArray(history) || history.length <= minTail + 1) return history;
+    const hasSys = history[0] && history[0].role === 'system';
+    const rest = hasSys ? history.slice(1) : history;
+    if (rest.length <= minTail) return history;
+    let keep = rest.slice(rest.length - minTail);
+    while (keep.length > 1 && (keep[0].role === 'tool' || keep[0].role === 'function')) keep.shift();
+    return hasSys ? [history[0]].concat(keep) : keep;
+}
+
+// v56.5: OLLAMA CONTEXT-OVERFLOW RECOVERY — called from the !res.ok path when Ollama
+// returns HTTP 400 `exceed_context_size_error` (newer Ollama hard-fails instead of
+// truncating, and the inputs deciding the overflow — persisted conversation, ctx slider,
+// system prompt — survive unloads/restarts, which is why the same error used to come
+// back instantly and forever). Trim depth `step`: 1 keeps system + the run's own
+// exchange (≥6 messages), 2 goes down to ≥2 — never cutting into the exchange in flight.
+// Returns { history, trimmed, message }:
+//   trimmed > 0 → retry with the smaller payload. The DURABLE history is compacted in
+//     place by the same amount (convo === chatHistory === histories[mode]) so the NEXT
+//     message doesn't pay this overflow again; the rendered view keeps every message —
+//     persist() snapshots the DOM, not the history array.
+//   trimmed = 0 → message is the honest, actionable Ollama error: num_ctx applies PER
+//     REQUEST here, so raising the Context Window slider takes effect on the next message
+//     (no reload), or the user clears the chat.
+function recoverOllamaOverflow(history, durable, step, runStartLen, numCtx) {
+    const runAdded = Math.max(0, history.length - runStartLen);
+    const minTail = step === 1 ? Math.max(6, runAdded + 1) : Math.max(2, runAdded + 1);
+    const pruned = pruneOllamaOverflow(history, minTail);
+    const trimmed = history.length - pruned.length;
+    if (trimmed > 0) {
+        try { if (Array.isArray(durable) && durable.length > trimmed) durable.splice(0, trimmed); } catch (e) { /* non-fatal */ }
+        return { history: pruned, trimmed, message: '' };
+    }
+    return {
+        history,
+        trimmed: 0,
+        message: `Prompt exceeds Ollama's context window (num_ctx = ${numCtx} tokens) even after trimming the conversation. Raise the **Context Window** slider in TUNING — Ollama applies it on the very next request, no reload needed — or clear the conversation with 🧹, then retry.`
+    };
+}
+
 async function pageOutModel(modelName) {
     if (!modelName || uplinkMode.checked) return;
     if (isSending) {
@@ -2082,9 +2298,12 @@ modelSelect.addEventListener('change', () => {
     // v52.2: an explicit pick from the dropdown wins over the "follow LM Studio's
     // loaded model" default for the rest of this session (until the URL changes).
     if (modelSelect.value && modelSelect.value !== 'Scanning...') userPickedModel = true;
-    // v56.4: Ollama has no management API — its engine loads the model on demand, so
-    // there is nothing to swap/unload here.
-    if (activeProvider === 'ollama') return;
+    // v56.5: on Ollama a pick is now a swap too — every OTHER resident model is stopped
+    // (the selection JIT-loads on the next message, exactly as before).
+    if (activeProvider === 'ollama') {
+        handleOllamaSwap();
+        return;
+    }
     // v52.5: a pick is now an IMMEDIATE swap — unload every other loaded LLM and load
     // the selection, so the dropdown always matches what's actually in VRAM.
     handleModelSwap();
@@ -2147,6 +2366,10 @@ async function handleModelSwap() {
 
 async function runModelSwap(req) {
     if (!req || !req.model || modelSwapInFlight) return null;
+    if (req.provider === 'ollama') return runOllamaSwap(req.model);
+    // v56.5: loading an LM Studio model frees Ollama FIRST — both backends resident at
+    // once is the OOM case the swap exists to prevent (embeddings are never touched).
+    try { await freeOtherBackendAtSafeBoundary(); } catch (e) { /* non-fatal */ }
     modelSwapInFlight = true;
     let res = null;
     try {
@@ -2188,13 +2411,119 @@ async function runModelSwap(req) {
     return res;
 }
 
+// --- v56.5: CROSS-PROVIDER FREE — only ONE backend may hold a chat model ---------
+// LM Studio and Ollama each hold their own VRAM, so the inactive one must never stay
+// resident while a model of the ACTIVE provider is loaded (or about to be) — that is
+// exactly the OOM case the swaps exist for. Every path that makes a provider active
+// (PROVIDER dropdown switch, dropdown pick on either side) first frees the OTHER backend
+// through the same management IPC as ⏏ UNLOAD ALL, which already protects embedding
+// models. Runs through the busy queue: while a run is in flight the backend it talks to
+// must not be freed mid-generation, so the request waits for the next safe boundary.
+let pendingCrossFree = false;
+
+function crossFreeTarget() {
+    return activeProvider === 'ollama'
+        ? { channel: 'lmstudio-unload-all', args: { apiBaseUrl: lmsApiBase() }, label: 'LM Studio' }
+        : { channel: 'ollama-unload-all', args: { baseUrl: ollamaApiBase() }, label: 'Ollama' };
+}
+
+async function freeOtherBackend() {
+    const target = crossFreeTarget();
+    pendingCrossFree = false;
+    let res = null;
+    try { res = await window.api.invoke(target.channel, target.args); }
+    catch (e) { res = { ok: false, error: e.message || String(e), unloaded: [], errors: [] }; }
+    const reason = res && res.reason;
+    if (reason === 'remote_endpoint' || reason === 'lmstudio_unavailable' || reason === 'ollama_unavailable') {
+        // Not ours to free / backend isn't running — expected, never chat-spam about it.
+        console.warn(`Cross-provider free (${target.label}) skipped:`, reason, (res && res.warning) || '');
+        return res;
+    }
+    const unloaded = Array.isArray(res && res.unloaded) ? res.unloaded : [];
+    if (unloaded.length > 0) {
+        const names = unloaded.map(u => (u && u.model) ? u.model : u);
+        addMessage('system', `⏏ **Freed ${target.label}** — stopped \`${names.join('`, `')}\` · only the active provider keeps VRAM.`);
+    }
+    const errors = Array.isArray(res && res.errors) ? res.errors : [];
+    if (errors.length > 0) {
+        addMessage('system', `⚠ **Cross-provider free (${target.label}):** could not stop ${errors.map(e => `\`${e.model}\``).join(', ')}.`);
+    }
+    return res;
+}
+
+// Queue when a run is in flight (flushed at the boundary below), run right away otherwise.
+function freeOtherBackendAtSafeBoundary() {
+    if (modelSwapBusy()) {
+        pendingCrossFree = true;
+        return null;
+    }
+    return freeOtherBackend();
+}
+
 // Flush a queued model swap at a safe boundary (no inference in flight). Called from
 // sendMessage() and every code-run start/stop/resume via the flushContextSync dep.
 async function flushPendingModelSwap() {
-    if (!pendingModelSwap || modelSwapBusy()) return null;
-    const req = pendingModelSwap;
-    pendingModelSwap = null;
-    return runModelSwap(req);
+    let flushed = null;
+    if (pendingModelSwap && !modelSwapBusy()) {
+        const req = pendingModelSwap;
+        pendingModelSwap = null;
+        flushed = await runModelSwap(req);
+    }
+    // v56.5: a cross-provider free queued while a run held the other backend.
+    if (pendingCrossFree && !modelSwapBusy()) {
+        await freeOtherBackend();
+    }
+    return flushed;
+}
+
+// --- v56.5: OLLAMA MODEL SWAP — picking a model stops every OTHER loaded one ------
+// Ollama JIT-loads on demand and keeps every model resident for its keep-alive window,
+// so before this version a pick left BOTH models in VRAM (OOM on low-VRAM cards). The
+// dropdown pick now stops every other running model through main (ollama-unload-others,
+// which protects embedding models like all-minilm — memory infrastructure), and the
+// pick itself stays resident. Queues exactly like the LM Studio swap while a run is
+// busy (last pick wins; flushed at the next safe boundary).
+async function handleOllamaSwap() {
+    const modelId = modelSelect.value;
+    if (!modelId || modelId === 'Scanning...') return;
+    if (modelSwapBusy()) {
+        pendingModelSwap = { provider: 'ollama', model: modelId, contextLength: null };
+        try {
+            const chipEl = document.getElementById('runtime-profile-chip');
+            if (chipEl) chipEl.textContent = `Model switch queued (${modelId})`;
+        } catch (e) { /* cosmetic only */ }
+        return;
+    }
+    await runOllamaSwap(modelId);
+}
+
+async function runOllamaSwap(modelId) {
+    // v56.5: loading an Ollama model frees LM Studio FIRST (same one-model-at-a-time rule,
+    // mirrored from runModelSwap).
+    try { await freeOtherBackendAtSafeBoundary(); } catch (e) { /* non-fatal */ }
+    let res = null;
+    try {
+        res = await window.api.invoke('ollama-unload-others', {
+            baseUrl: effectiveApiBase(),
+            keepModel: modelId
+        });
+    } catch (e) {
+        res = { ok: false, error: e.message || String(e), unloaded: [], errors: [] };
+    }
+    const unloaded = Array.isArray(res?.unloaded) ? res.unloaded : [];
+    const errors = Array.isArray(res?.errors) ? res.errors : [];
+    if (unloaded.length > 0) {
+        addMessage('system', `🔁 **Switched to \`${modelId}\`** — stopped \`${unloaded.join('`, `')}\` in Ollama · VRAM freed.`);
+    } else if (res && res.reason === 'ollama_unavailable') {
+        // Not fatal: the selection still works — Ollama will just JIT-load it.
+        console.warn('Ollama swap: server unreachable —', res.warning);
+    } else if (res && res.error) {
+        addMessage('system', `**Ollama model switch:** could not free the previous model — ${res.error}`);
+    }
+    if (errors.length > 0) {
+        addMessage('system', `⚠ **Ollama swap:** failed to stop ${errors.map(e => `\`${e.model}\``).join(', ')}.`);
+    }
+    return res;
 }
 
 // --- v52.3: UNLOAD ALL — free every model currently loaded in LM Studio ---
@@ -2216,40 +2545,68 @@ if (unloadAllBtn) {
 
     unloadAllBtn.addEventListener('click', async () => {
         if (unloadingAll) return; // one in-flight at a time — unloads are sequential in main anyway
-        // v56.4: UNLOAD ALL drives LM Studio's management API + lms CLI — Ollama has neither.
-        if (activeProvider === 'ollama') {
-            addMessage('system', '**UNLOAD ALL** is an LM Studio feature — it frees models via LM Studio\'s management API. Switch the PROVIDER to LM Studio first, or stop Ollama (`ollama stop <model>` / `systemctl restart ollama`) to free VRAM.');
-            return;
-        }
+        // v56.5: UNLOAD ALL frees BOTH backends — LM Studio's instances (management API)
+        // and Ollama's loaded models — regardless of which provider is active. Embedding
+        // models (all-minilm, memory infrastructure) are protected on both sides.
         setUnloadBusy(true);
-        let res = null;
-        try {
-            res = await window.api.invoke('lmstudio-unload-all', { apiBaseUrl: effectiveApiBase() });
-        } catch (e) {
-            res = { ok: false, error: e.message || String(e), unloaded: [], errors: [] };
-        }
+        const invokeSafe = async (channel, args) => {
+            try { return await window.api.invoke(channel, args); }
+            catch (e) { return { ok: false, error: e.message || String(e), unloaded: [], errors: [] }; }
+        };
+        const [lmsRes, ollamaRes] = await Promise.all([
+            invokeSafe('lmstudio-unload-all', { apiBaseUrl: lmsApiBase() }),
+            invokeSafe('ollama-unload-all', { baseUrl: ollamaApiBase() })
+        ]);
         setUnloadBusy(false);
 
-        const unloaded = Array.isArray(res?.unloaded) ? res.unloaded : [];
-        const errors = Array.isArray(res?.errors) ? res.errors : [];
-        let line;
-        if (res && res.reason === 'remote_endpoint') {
-            line = '**UNLOAD ALL** needs a local LM Studio backend — remote endpoints don\'t expose the management API.';
-        } else if (res && res.reason === 'lmstudio_unavailable') {
-            line = `**UNLOAD ALL:** can't reach LM Studio's management API (${res.warning || 'unreachable'}). Is the server running?`;
-        } else if (res && res.error) {
-            line = `**UNLOAD ALL failed:** ${res.error}`;
-        } else if (unloaded.length === 0 && errors.length === 0) {
-            line = '**Nothing loaded in LM Studio** — VRAM is already free.';
+        const lines = [];
+        // --- LM Studio ---
+        if (lmsRes && lmsRes.reason === 'remote_endpoint') {
+            lines.push('LM Studio: remote endpoint — no local management API, nothing to free.');
+        } else if (lmsRes && lmsRes.reason === 'lmstudio_unavailable') {
+            lines.push('LM Studio: not reachable — skipped.');
+        } else if (lmsRes && lmsRes.error) {
+            lines.push(`LM Studio: unload failed — ${lmsRes.error}`);
         } else {
-            const names = unloaded.map(u => u.model).join(', ');
-            line = `⏏ **Unloaded ${unloaded.length} model${unloaded.length === 1 ? '' : 's'}:** \`${names}\` — VRAM freed.`;
+            const unloaded = Array.isArray(lmsRes?.unloaded) ? lmsRes.unloaded : [];
+            const errors = Array.isArray(lmsRes?.errors) ? lmsRes.errors : [];
+            if (unloaded.length > 0) {
+                let l = `⏏ **Unloaded ${unloaded.length} LM Studio model${unloaded.length === 1 ? '' : 's'}:** \`${unloaded.map(u => u.model).join('`, `')}\``;
+                if (Array.isArray(lmsRes.protected) && lmsRes.protected.length > 0) {
+                    l += ` · kept embedding \`${lmsRes.protected.map(p => p.model).join('`, `')}\``;
+                }
+                lines.push(l);
+            } else if (errors.length === 0) {
+                lines.push('LM Studio: nothing loaded.');
+            }
             if (errors.length > 0) {
-                const failed = errors.map(e => `${e.model}: ${e.error}`).join('; ');
-                line += `\n⚠ **Failed to unload ${errors.length}:** ${failed}`;
+                lines.push(`⚠ LM Studio failed to unload ${errors.length}: ${errors.map(e => `${e.model}: ${e.error}`).join('; ')}`);
             }
         }
-        addMessage('system', line);
+        // --- Ollama ---
+        if (ollamaRes && ollamaRes.reason === 'remote_endpoint') {
+            lines.push('Ollama: remote endpoint — skipped (only local models are managed).');
+        } else if (ollamaRes && ollamaRes.reason === 'ollama_unavailable') {
+            lines.push('Ollama: not reachable — skipped.');
+        } else if (ollamaRes && ollamaRes.error) {
+            lines.push(`Ollama: unload failed — ${ollamaRes.error}`);
+        } else {
+            const unloaded = Array.isArray(ollamaRes?.unloaded) ? ollamaRes.unloaded : [];
+            const errors = Array.isArray(ollamaRes?.errors) ? ollamaRes.errors : [];
+            if (unloaded.length > 0) {
+                let l = `⏏ **Stopped ${unloaded.length} Ollama model${unloaded.length === 1 ? '' : 's'}:** \`${unloaded.join('`, `')}\``;
+                if (Array.isArray(ollamaRes.protected) && ollamaRes.protected.length > 0) {
+                    l += ` · kept embedding \`${ollamaRes.protected.join('`, `')}\``;
+                }
+                lines.push(l);
+            } else if (errors.length === 0) {
+                lines.push('Ollama: nothing loaded.');
+            }
+            if (errors.length > 0) {
+                lines.push(`⚠ Ollama failed to stop ${errors.length}: ${errors.map(e => `${e.model}: ${e.error}`).join('; ')}`);
+            }
+        }
+        addMessage('system', lines.join('\n'));
 
         // Refresh the dropdown so the LOADED badge / selection tracks the new state.
         try { await fetchModels(); } catch (e) { /* non-fatal — next poll retries */ }
@@ -3316,6 +3673,24 @@ My Query: ${text}`;
         // Now that chatHistory has both the system prompt AND the new user prompt,
         // we can safely clone it into payloadHistory so the AI actually sees the instruction.
         let payloadHistory = JSON.parse(JSON.stringify(chatHistory));
+        // v56.5: OLLAMA PAYLOAD CAP — Ollama only ever receives the system prompt plus the
+        // last OLLAMA_PAYLOAD_TAIL messages of the conversation; the current run's own
+        // exchange is layered on top of that window and stays untouched (that IS the
+        // "current Chatverlauf" the model needs to keep working). Only the clone is cut —
+        // the rendered/persisted history keeps everything, and the v56.5 overflow guard
+        // below still applies if even this window is too big for num_ctx.
+        if (activeProvider === 'ollama') {
+            const cappedHistory = pruneOllamaOverflow(payloadHistory, OLLAMA_PAYLOAD_TAIL);
+            if (cappedHistory.length < payloadHistory.length) {
+                console.log(`[CONTEXT] Ollama payload capped to system + last ${OLLAMA_PAYLOAD_TAIL} messages (${payloadHistory.length} → ${cappedHistory.length}); UI history unchanged.`);
+                payloadHistory = cappedHistory;
+            }
+        }
+        // v56.5: Ollama overflow-recovery bookkeeping (guard rail in the !res.ok path):
+        // how many trims this run has done, and where this run's own messages start — a
+        // trim may cut into OLDER history only, never into the exchange in flight.
+        let ollamaPruneStep = 0;
+        const ollamaRunStartLen = payloadHistory.length;
 
         console.log(`Connecting to Uplink at ${effectiveApiBase()}...`);
         let finished = false;
@@ -3554,9 +3929,17 @@ My Query: ${text}`;
                     model,
                     messages: messagesForOllama,
                     stream: true,
-                    options: { temperature: parseFloat(tempSlider.value), num_ctx: parseInt(ctxSlider?.value || 8192) },
-                    keep_alive: -1
+                    options: ollamaChatOptions(), // shared with the lease renewal so both always agree
+                    // v56.5: FINITE generation lease (was keep_alive:-1 → Ollama kept the
+                    // model resident forever, expires_at year 2319; v56.5's '1h' safety net
+                    // surfaced as a ~60-minute timer in `ollama ps`). Every request re-arms
+                    // OLLAMA_LEASE and the heartbeat renews it while the app is open, so
+                    // the model stays loaded for the whole session — yet no request can
+                    // ever pin it: once the app is gone the window expires ≤8 min later
+                    // even if NO release ever runs.
+                    keep_alive: OLLAMA_LEASE
                 };
+                lastOllamaLeaseModel = model; // remembered so pagehide can release it
                 if (activeTools.length > 0) body.tools = activeTools;
             }
 
@@ -3654,7 +4037,7 @@ My Query: ${text}`;
                 // v53.6: actionable failure text (parity with Code Mode's classifyHttpError):
                 // a context overflow says "lower the context slider", a load failure says
                 // "pick a model that fits VRAM" — never a raw engine dump the user can't act on.
-                const classified = window.XKStreamSignals?.classifyHttpError?.({ status: res.status, body: errorText });
+                let classified = window.XKStreamSignals?.classifyHttpError?.({ status: res.status, body: errorText });
                 // v56.4: the auto-expand guardrail is LM Studio-only — it reloads the model
                 // through LM Studio's management API (lms CLI), which Ollama does not have.
                 if (classified && classified.isContextOverflow && !ctxAutoExpanded && activeProvider !== 'ollama') {
@@ -3685,6 +4068,20 @@ My Query: ${text}`;
                     }
                     // No room to grow (already at max / unmanaged endpoint / expand failed) —
                     // fall through to the honest error below.
+                }
+                // v56.5: OLLAMA OVERFLOW RECOVERY (recoverOllamaOverflow above) — shrink the
+                // payload and retry instead of dying; honest Ollama-specific error if even
+                // system + tools + the current turn don't fit num_ctx.
+                if (classified && classified.isContextOverflow && activeProvider === 'ollama') {
+                    ollamaPruneStep++;
+                    const fix = recoverOllamaOverflow(payloadHistory, convo, ollamaPruneStep, ollamaRunStartLen, parseInt(ctxSlider?.value || 8192, 10));
+                    if (fix.trimmed > 0) {
+                        payloadHistory = fix.history;
+                        console.warn(`[GUARD RAIL] Ollama context overflow — trimmed ${fix.trimmed} older message(s), retrying.`);
+                        if (ollamaPruneStep === 1) addMessage('system', `✂️ **Context window overflow** — trimmed ${fix.trimmed} older conversation message(s) to fit Ollama's context window and retried; everything stays visible above.`);
+                        continue; // same turn, fresh request with the smaller payload
+                    }
+                    classified = { isContextOverflow: true, message: fix.message };
                 }
                 if (classified && classified.message) throw new Error(classified.message);
                 throw httpErr;
@@ -4308,6 +4705,11 @@ My Query: ${text}`;
         // (queued by handleModelSwap) executes NOW at this safe boundary instead of waiting for
         // the next message. Nothing was cut off: it never ran while tokens were flowing.
         try { if (typeof globalThis.flushPendingModelSwap === 'function') await globalThis.flushPendingModelSwap(); } catch (e) { /* optional */ }
+        // v56.5: the run is over — hand Ollama's generation lock back to the OLLAMA_LEASE
+        // window. While the app stays open the heartbeat keeps renewing it (the model
+        // STAYS loaded, as requested); once the app is gone the window stops renewing and
+        // frees the model by itself. Fire-and-forget: never blocks the UI reset.
+        try { const rel = releaseOllamaLock(); if (rel && rel.catch) rel.catch(() => {}); } catch (e) { /* non-fatal */ }
 
         if (!codeRunState.isBusy && window.XKScrollFollow && window.XKScrollFollow.get()) {
             window.XKScrollFollow.get().endRun();

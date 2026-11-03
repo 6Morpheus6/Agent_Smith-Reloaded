@@ -19,6 +19,7 @@ const registerPluginsIpc = require('./plugins.js');
 const registerCodeIpc = require('./code.js');
 const registerPreviewIpc = require('./preview.js');
 const registerLmStudioIpc = require('./lmStudio.js');
+const registerOllamaIpc = require('./ollama.js');
 const registerActionsIpc = require('./actions.js');
 const registerImageGenIpc = require('./imageGen.js');
 const registerElectronAssetsIpc = require('./electronAssets.js');
@@ -40,6 +41,7 @@ module.exports = function registerAllIpc(ipcMain, deps) {
         ['code', registerCodeIpc],
         ['preview', registerPreviewIpc],
         ['lmStudio', registerLmStudioIpc],
+        ['ollama', registerOllamaIpc],
         ['actions', registerActionsIpc],
         ['imageGen', registerImageGenIpc],
         ['electronAssets', registerElectronAssetsIpc],

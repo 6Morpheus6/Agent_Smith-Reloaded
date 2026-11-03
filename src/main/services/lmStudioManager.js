@@ -330,22 +330,29 @@ function createLmStudioManager(deps = {}) {
     // say exactly what happened. Returns { ok, unloaded: [{model, instanceId}], errors }.
     async function unloadAll({ apiBaseUrl }) {
         if (!isLoopbackApiBase(apiBaseUrl)) {
-            return { ok: false, reason: 'remote_endpoint', unloaded: [], errors: [] };
+            return { ok: false, reason: 'remote_endpoint', unloaded: [], protected: [], errors: [] };
         }
         let payload;
         try {
             payload = await requestJson(managementUrl(apiBaseUrl));
         } catch (e) {
-            return { ok: false, reason: 'lmstudio_unavailable', warning: e.message, unloaded: [], errors: [] };
+            return { ok: false, reason: 'lmstudio_unavailable', warning: e.message, unloaded: [], protected: [], errors: [] };
         }
         const models = Array.isArray(payload?.models) ? payload.models : [];
-        // Collect every loaded instance across all models. An instance id is unique per
+        // v56.5: EMBEDDING MODELS ARE PROTECTED — memory recall is infrastructure, not a
+        // chat model (same rule swapModel already applies). all-minilm & friends run
+        // CPU-only and must survive an UNLOAD ALL so cross-session memory keeps working.
+        const all = collectLoadedInstances(payload);
+        const isEmbedding = (inst) => inst.type === 'embedding' || EMBED_NAME_HINT.test(inst.model);
+        const protectedModels = all.filter(isEmbedding)
+            .map(({ model, instanceId }) => ({ model, instanceId }));
+        // Collect every loaded LLM instance across all models. An instance id is unique per
         // load (LM Studio suffixes duplicates), so unloading by instance id never hits a
         // model that was not in the list we just read.
-        const targets = collectLoadedInstances(payload)
+        const targets = all.filter(inst => !isEmbedding(inst))
             .map(({ model, instanceId }) => ({ model, instanceId }));
         if (targets.length === 0) {
-            return { ok: true, unloaded: [], errors: [] };
+            return { ok: true, unloaded: [], protected: protectedModels, errors: [] };
         }
         const unloaded = [];
         const errors = [];
@@ -361,7 +368,7 @@ function createLmStudioManager(deps = {}) {
                 else errors.push({ model: t.model, instanceId: t.instanceId, error: e.message });
             }
         }
-        return { ok: errors.length === 0, unloaded, errors };
+        return { ok: errors.length === 0, unloaded, protected: protectedModels, errors };
     }
 
     // v52.5: MODEL SWAP — the user picked a new model from the dropdown, so free every
@@ -527,5 +534,7 @@ module.exports = {
     isLoopbackApiBase,
     buildContextCandidates,
     defaultLmsPath,
+    // v56.5: exported so ollamaManager protects the SAME embedding models on the Ollama side.
+    EMBED_NAME_HINT,
     createLmStudioManager
 };

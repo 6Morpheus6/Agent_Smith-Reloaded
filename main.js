@@ -5,6 +5,7 @@ const { spawn, exec, execSync } = require('child_process');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const { createLmStudioManager } = require('./src/main/services/lmStudioManager.js');
+const { createOllamaManager } = require('./src/main/services/ollamaManager.js');
 const { createImageGenManager } = require('./src/main/services/imageGenManager.js');
 
 // Resource Monitoring System
@@ -692,6 +693,9 @@ const browserVerify = safeInit('browserVerify', () => createBrowserVerify({ proj
 const actionLog = safeInit('actionLog', () => createActionLog({ userDataPath }));
 const downloadRegistry = safeInit('downloadRegistry', () => createDownloadRegistry({ userDataPath }));
 const lmStudioManager = safeInit('lmStudioManager', () => createLmStudioManager());
+// v56.5: Ollama unloading — UNLOAD ALL frees Ollama models alongside LM Studio's, and a
+// dropdown pick stops every other resident Ollama model (embeddings stay protected).
+const ollamaManager = safeInit('ollamaManager', () => createOllamaManager());
 // v54.8 — Electron Depot: pre-provisioned Electron runtimes + builder toolsets so Code Mode
 // packaging builds (npm install / electron-builder) never pull ~120 MB from GitHub.
 const { createElectronDepot } = require('./src/main/services/electronDepot.js');
@@ -728,6 +732,7 @@ registerAllIpc(ipcMain, {
     actionLog,
     downloadRegistry,
     lmStudioManager,
+    ollamaManager,
     electronDepot,
     imageGenManager,
     electronAssets,

@@ -75,7 +75,11 @@ function classifyStreamEnd(end) {
  */
 function classifyHttpError(err) {
     const body = String((err && (err.body != null ? err.body : err.message)) || '');
-    if (/exceed_context_size|exceeds the available context size/i.test(body)) {
+    // v56.5 — Ollama overflow shapes (both seen in the wild, both reach us as HTTP 400):
+    //   local post-#16712: {"error":"…\"message\":\"request (N tokens) exceeds the available
+    //   context size (M tokens)…\",\"type\":\"exceed_context_size_error\"…"}
+    //   other builds:      {"error":"prompt too long; exceeded max context length by N tokens"}
+    if (/exceed_context_size|exceeds the available context size|prompt too long|exceeded max context length|context length exceeded/i.test(body)) {
         return {
             isContextOverflow: true,
             message: 'Prompt exceeds the model\'s loaded context window. Lower the Context Window slider (or reload LM Studio with a larger context) and retry.'

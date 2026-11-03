@@ -612,3 +612,60 @@ test('swapModel and ensureEmbeddingModel serialize on the same operation queue (
         }
     }
 });
+
+// --- v56.5: UNLOAD ALL protects embedding models --------------------------------
+
+test('unloadAll protects embedding instances — memory infrastructure survives (v56.5)', async () => {
+    const posts = [];
+    const manager = createLmStudioManager({
+        requestJson: async () => ({
+            models: [
+                {
+                    key: 'unsloth/qwen3-8b',
+                    type: 'llm',
+                    loaded_instances: [{ id: 'unsloth/qwen3-8b', config: { context_length: 4096, parallel: 1 } }]
+                },
+                {
+                    // Typed embedding instance (LM Studio reports the type).
+                    key: 'second-state/all-MiniLM-L6-v2',
+                    type: 'embedding',
+                    loaded_instances: [{ id: 'second-state/all-MiniLM-L6-v2', config: { context_length: 512, parallel: 1 } }]
+                },
+                {
+                    // No type reported — the NAME heuristic must still protect it.
+                    key: 'bge-m3',
+                    loaded_instances: [{ id: 'bge-m3', config: { context_length: 512, parallel: 1 } }]
+                }
+            ]
+        }),
+        postJson: async (_url, body) => { posts.push(body.instance_id); return {}; }
+    });
+    const result = await manager.unloadAll({ apiBaseUrl: 'http://127.0.0.1:1234' });
+    assert.equal(result.ok, true);
+    // Only the chat model is unloaded; both embedding instances stay resident.
+    assert.deepEqual(posts, ['unsloth/qwen3-8b']);
+    assert.deepEqual(result.unloaded.map(u => u.instanceId), ['unsloth/qwen3-8b']);
+    assert.deepEqual(result.protected.map(p => p.instanceId), [
+        'second-state/all-MiniLM-L6-v2',
+        'bge-m3'
+    ]);
+});
+
+test('unloadAll with ONLY embedding models loaded frees nothing (v56.5)', async () => {
+    let posts = 0;
+    const manager = createLmStudioManager({
+        requestJson: async () => ({
+            models: [{
+                key: 'second-state/all-MiniLM-L6-v2',
+                type: 'embedding',
+                loaded_instances: [{ id: 'second-state/all-MiniLM-L6-v2', config: {} }]
+            }]
+        }),
+        postJson: async () => { posts++; return {}; }
+    });
+    const result = await manager.unloadAll({ apiBaseUrl: 'http://127.0.0.1:1234' });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.unloaded, []);
+    assert.deepEqual(result.protected.map(p => p.model), ['second-state/all-MiniLM-L6-v2']);
+    assert.equal(posts, 0);
+});

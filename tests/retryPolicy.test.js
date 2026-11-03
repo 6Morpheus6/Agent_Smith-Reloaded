@@ -40,6 +40,7 @@ test('permanent failures are fatal — retrying them only burns minutes', () => 
     const fatal = [
         "Prompt exceeds the model's loaded context window.",
         'exceed_context_size_error: this model’s maximum context length is 8192 tokens',
+        '{"error":"prompt too long; exceeded max context length by 1493 tokens"}', // Ollama overflow (v56.5)
         'invalid api key',
         'unauthorized',
         'no models loaded',

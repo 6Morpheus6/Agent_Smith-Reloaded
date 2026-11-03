@@ -37,7 +37,7 @@ const RETRYABLE_PATTERNS = [
 
 // Permanent signatures — retrying these only wastes minutes of the user's time.
 const FATAL_PATTERNS = [
-    /exceed_context_size|exceeds the available context size/i,
+    /exceed_context_size|exceeds the available context size|prompt too long|exceeded max context length|context length exceeded/i,
     /context window/i,
     /invalid api key|unauthorized|forbidden\b/i,
     /model.*not found|no models? loaded|failed to load model/i,

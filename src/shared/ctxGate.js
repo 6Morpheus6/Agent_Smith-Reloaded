@@ -64,7 +64,21 @@ function reflectLoadedContext(desiredNumCtx, status) {
     return Math.min(Math.max(loaded, CTX_SLIDER_MIN), CTX_SLIDER_MAX);
 }
 
-const api = { minCtx, checkCtxGate, reflectLoadedContext, DEFAULT_MIN_CTX, CTX_SLIDER_MIN, CTX_SLIDER_MAX };
+/**
+ * v56.6 — DEFAULT LOAD TARGET when the app loads a model for the user without an explicit
+ * tuning value: the app-wide minimum, or the given value when that is already higher. A window
+ * below the minimum can never be used (the send gate rejects it), so a small reflected number —
+ * LM Studio's own JIT default is 4096 — must never become the context a model is loaded at.
+ * Explicit user values (manual override) bypass this entirely in the UI.
+ */
+function defaultLoadCtx(value) {
+    const min = minCtx();
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return min;
+    return Math.max(min, Math.floor(n));
+}
+
+const api = { minCtx, checkCtxGate, reflectLoadedContext, defaultLoadCtx, DEFAULT_MIN_CTX, CTX_SLIDER_MIN, CTX_SLIDER_MAX };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 if (typeof window !== 'undefined') window.XKCtxGate = api;

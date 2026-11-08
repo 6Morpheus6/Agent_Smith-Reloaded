@@ -3,9 +3,11 @@
  *
  * v55.9.1 — MIN-CTX AUTO-RELOAD: the 10s refresh loop (and every send) re-reads what LM
  * Studio ACTUALLY has loaded for the selected model; if that verified window is below the
- * app-wide minimum (ctxGate.minCtx, 32000), auto-tune reloads THAT model in LM Studio at
- * the floor automatically — instead of letting the send gate wall the user off with
- * "Minimum context not met" and telling them to fix it by hand.
+ * app-wide minimum (ctxGate.minCtx, 32000), the app reloads THAT model in LM Studio at the
+ * floor automatically — instead of letting the send gate wall the user off with "Minimum
+ * context not met" and telling them to fix it by hand. Since v56.6 that applies whether
+ * Auto-tune is on or off (a below-floor window is never usable); only an explicit tuning
+ * value (manual override) is left alone.
  */
 (function (global) {
     'use strict';
@@ -169,10 +171,20 @@
         } catch (e) { /* status is advisory — fall through to the computed profile */ }
         _loadedCtx = Number(result?.managed === true ? result.loadedContext : NaN);
         if (!Number.isFinite(_loadedCtx)) _loadedCtx = null;
+        // v56.5.1 — NEVER paint a BELOW-MINIMUM window over the CT value while auto-tune owns
+        // it. A verified window under the app minimum (an embedding model's 512 tokens, a
+        // tiny preload from the other backend) is not a usable chat default, and
+        // ensureMinCtx() below is about to reload at the 32000 floor. Reflecting it first is
+        // exactly how the CT field ended up showing 512 right after a provider switch.
+        const belowFloor = _loadedCtx > 0 && _loadedCtx < minCtxFloor();
+        // v56.6: a below-floor window is never a usable default — and with auto-tune OFF it is
+        // not a user choice either (LM Studio's own JIT default is 4096), while ensureMinCtx()
+        // is about to reload at the floor. Only an explicit tuning value is reflected.
+        const canReflect = !(belowFloor && !hasOverride());
         // v55.9.2: while a MANUAL APPLY is in flight, the button owns the slider — reflection
         // must not repaint it with the pre-reload window mid-operation (the reload takes
         // seconds on multi-GB models and the 10s loop would otherwise fight the button).
-        if (_loadedCtx > 0 && !_applyingCtx && String(_els.ctxSlider.value) !== String(_loadedCtx)) {
+        if (canReflect && _loadedCtx > 0 && !_applyingCtx && String(_els.ctxSlider.value) !== String(_loadedCtx)) {
             // The loaded window is ground truth for the slider — override whatever was set.
             _applying = true;
             _els.ctxSlider.value = String(Math.min(_loadedCtx, Number(_els.ctxSlider.max) || _loadedCtx));
@@ -181,7 +193,7 @@
         }
         // v56.0.1 — mirror the verified window into the typed custom-context field too (never
         // while the user is typing in it or a manual apply owns the value).
-        mirrorCustomCtx(_loadedCtx);
+        if (canReflect) mirrorCustomCtx(_loadedCtx);
         // v55.9.1: verified-but-too-small → fix it in LM Studio now, for the user.
         if (_loadedCtx > 0 && _loadedCtx < minCtxFloor()) {
             ensureMinCtx(modelId);
@@ -192,8 +204,10 @@
     /**
      * v55.9.1 — MIN-CTX AUTO-RELOAD: the selected model is VERIFIED loaded below the app-wide
      * minimum (32000). Reload it in LM Studio at exactly that floor, for the user:
-     *   - only when auto-tune is ON and no manual override is active (a deliberate slider pick
-     *     is respected — same contract as every other auto-tune action);
+     *   - whenever no manual override is active. v56.6: this no longer depends on the Auto-tune
+     *     toggle — "auto-tune off" means "no computed profile", not "LM Studio's 4096 default
+     *     is fine", since a window under the floor is rejected by the send gate anyway. A
+     *     deliberate tuning value (slider drag / Custom Context APPLY) is still respected;
      *   - never while a run is busy or another reload/sync is in flight (the 10s refresh loop
      *     re-checks on its next tick, so nothing is lost by waiting);
      *   - with a 60s back-off after a FAILED attempt, so hardware that genuinely cannot hold
@@ -203,7 +217,7 @@
      */
     function ensureMinCtx(modelId) {
         const min = minCtxFloor();
-        if (!modelId || !isAutoTuneEnabled() || hasOverride()) return null;
+        if (!modelId || hasOverride()) return null;
         if (_minReloadInFlight || _syncing || busyNow()) return null;
         if (_lastMinReloadFail && _lastMinReloadFail.model === modelId
             && Date.now() - _lastMinReloadFail.at < 60000) {
@@ -286,6 +300,35 @@
         if (_lastMinReloadFail && _lastMinReloadFail.model === modelId
             && Date.now() - _lastMinReloadFail.at < 60000) return { state: 'backoff', min };
         return { state: null, min };
+    }
+
+    /**
+     * v56.5.1 — PROVIDER-SWITCH DEFAULT (32000).
+     *
+     * Switching the backend used to leave whatever the OTHER side last reported in the CT
+     * field — e.g. an embedding model's 512-token window — as if it were a sane default. A
+     * provider switch now starts from the app-wide minimum (32000, env-overridable), clears
+     * any manual override so auto-tune applies again, and (LM Studio only) loads exactly
+     * that window. Ollama needs nothing: num_ctx is sent per request.
+     */
+    async function resetContextForProvider() {
+        const min = minCtxFloor();
+        _loadedCtx = null;
+        _lastMinReloadFail = null;
+        setOverride(false);
+        _applying = true;
+        if (_els?.ctxSlider) {
+            _els.ctxSlider.value = String(Math.min(min, Number(_els.ctxSlider.max) || min));
+            if (_els.ctxVal) _els.ctxVal.textContent = String(min);
+        }
+        _applying = false;
+        mirrorCustomCtx(min);
+        setChipStatus(`ctx ${min}`, 'Default context after a provider switch.');
+        if (providerIsOllama()) return min;
+        const modelId = _modelSelect?.value;
+        if (!modelId) return min;
+        try { await syncContextForModel(modelId, min); } catch (e) { /* reported on the chip */ }
+        return min;
     }
 
     /** Verified loaded context for the current selection, or null when unverified. */
@@ -630,6 +673,8 @@
         // v55.9.2 — explicit APPLY button next to the ctx slider (manual ctx reload).
         applyCtx,
         refreshLoadedContext,
+        // v56.5.1 — provider switch resets the CT value to the 32000 app default.
+        resetContextForProvider,
         refreshCurrentLoadedContext,
         markSwapHandled,
         getVerifiedLoadedCtx,

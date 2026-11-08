@@ -118,22 +118,48 @@ test('a model loaded AT or ABOVE the minimum is never reloaded', async () => {
     assert.equal(ensures.length, 0, '32000 is the inclusive minimum — no reload');
 });
 
-test('auto-tune OFF or a manual override: below-min ctx is detected but NOT auto-reloaded', async () => {
-    for (const seed of [{ agentsmith_auto_tune: 'false' }, { agentsmith_profile_override: 'true' }]) {
-        const ensures = [];
-        const ui = loadUi({ invoke: async (channel, opts) => {
-            if (channel === 'lmstudio-get-status') return { managed: true, model: opts.model, loadedContext: 8192, maxContext: 131072 };
-            if (channel === 'lmstudio-ensure-model') ensures.push(opts);
-            return null;
-        }, lsSeed: seed });
-        const els = elements();
-        mount(ui, els);
+test('v56.6: auto-tune OFF without a manual override still fixes a below-min window', async () => {
+    // Auto-tune off means "no computed profile", NOT "a 4096 window is fine": a model LM
+    // Studio JIT-loaded at its own 4096 default is rejected by the send gate, so the floor is
+    // applied for the user. Regression: picking a model with tuning off loaded (and kept) it
+    // at 4096 and every send ended in "Minimum context not met".
+    const ensures = [];
+    let loadedCtx = 4096;
+    const ui = loadUi({ lsSeed: { agentsmith_auto_tune: 'false' }, invoke: async (channel, opts) => {
+        if (channel === 'lmstudio-get-status') return { managed: true, model: opts.model, loadedContext: loadedCtx, maxContext: 131072 };
+        if (channel === 'lmstudio-ensure-model') {
+            ensures.push(opts.contextLength);
+            loadedCtx = opts.contextLength;
+            return { managed: true, requestedContext: opts.contextLength, loadedContext: opts.contextLength, maxContext: 131072 };
+        }
+        return null;
+    }});
+    const els = elements();
+    mount(ui, els);
 
-        await ui.refreshCurrentLoadedContext();
-        await new Promise(r => setTimeout(r, 5));
+    await ui.refreshCurrentLoadedContext();
+    await new Promise(r => setTimeout(r, 5));
 
-        assert.equal(ensures.length, 0, `no auto-reload with ${JSON.stringify(seed)}`);
-    }
+    assert.deepEqual(ensures, [32000], 'the 32000 floor is loaded even with auto-tune off');
+    assert.equal(els.ctxSlider.value, '32000');
+});
+
+test('a manual override: below-min ctx is detected but NOT auto-reloaded', async () => {
+    // An explicit tuning value (slider drag / Custom Context APPLY) is the user's call — the
+    // floor is not forced over it.
+    const ensures = [];
+    const ui = loadUi({ invoke: async (channel, opts) => {
+        if (channel === 'lmstudio-get-status') return { managed: true, model: opts.model, loadedContext: 8192, maxContext: 131072 };
+        if (channel === 'lmstudio-ensure-model') ensures.push(opts);
+        return null;
+    }, lsSeed: { agentsmith_profile_override: 'true' } });
+    const els = elements();
+    mount(ui, els);
+
+    await ui.refreshCurrentLoadedContext();
+    await new Promise(r => setTimeout(r, 5));
+
+    assert.equal(ensures.length, 0, 'no auto-reload with a manual override');
 });
 
 test('a FAILED below-min reload backs off (no churn) and reports the VRAM reality on the chip', async () => {
@@ -242,6 +268,34 @@ test('busy runs do not trigger an immediate auto-reload (the refresh loop retrie
     await ui.refreshCurrentLoadedContext(); // next tick — now it fires
     await new Promise(r => setTimeout(r, 5));
     assert.deepEqual(ensures, [32000]);
+});
+
+test('v56.5.1: a provider switch resets the CT value to 32000, never a reflected below-min window', async () => {
+    // Regression: switching provider left the field at a tiny window reported by the other
+    // backend (e.g. an embedding model's 512 tokens) instead of the 32000 default.
+    const ensures = [];
+    const ui = loadUi({ invoke: async (channel, opts) => {
+        if (channel === 'lmstudio-get-status') return { managed: true, model: opts.model, loadedContext: 512, maxContext: 131072 };
+        if (channel === 'lmstudio-ensure-model') {
+            ensures.push(opts.contextLength);
+            return { managed: true, model: opts.model, requestedContext: opts.contextLength, loadedContext: 32000, maxContext: 131072 };
+        }
+        return null;
+    }});
+    const els = elements();
+    mount(ui, els);
+
+    // The switch resets the visible value to the app default and asks LM Studio for it.
+    const out = await ui.resetContextForProvider();
+    assert.equal(out, 32000);
+    assert.equal(els.ctxSlider.value, '32000');
+    assert.equal(els.ctxVal.textContent, '32000');
+    assert.ok(ensures.includes(32000), 'LM Studio was asked to load the 32000 default');
+
+    // A later refresh that still sees the 512 window must NOT paint it over the default.
+    await ui.refreshCurrentLoadedContext();
+    await new Promise(r => setTimeout(r, 5));
+    assert.equal(els.ctxSlider.value, '32000', 'below-min reflection never overwrites the CT default');
 });
 
 test('unmanaged / unreachable endpoints: no auto-reload (nothing to reload against)', async () => {

@@ -1,5 +1,80 @@
 # Agent Smith Changelog
 
+## [56.5.1] - 2026-11-06 — 🐞 Code Mode can be switched off again + a provider switch restores the 32000 CT default
+
+Code Mode could not be controlled and could not be trusted to stay out of the way. Two
+separate causes:
+
+1. **The CODE switch was decorative.** `isCodeModeEnabled()` was hard-wired to `false` since
+   the v51.2 per-message routing release, and the hidden `code-mode-toggle` was force-unchecked
+   at startup and disabled by mutual exclusion (agent mode is always on). Routing therefore ran
+   on the task classifier alone: any message it scored as "coding" started the full build
+   pipeline even though the user had Code Mode off.
+2. **A bare build-file name was a STRONG coding signal.** `/package\.json|requirements\.txt|
+   cargo\.toml|…/` alone (2 points, no negatives) was enough for Code Mode. So a question like
+   *"where is cargo.toml?"* — or an answer to the model's own question about it — became a
+   Code run that wrote no files and ended in *"Code run — UNVERIFIED … No files written in 12
+   turns"*. That screenshot was a misrouted Q&A, not a broken build.
+
+### What changed
+
+- **`src/shared/taskClassifier.js`** — `routeMessage(text, { allowCode })`. With
+  `allowCode: false` no heuristic and no `code:` prefix can select the code engine (the
+  prefix is still stripped and reported as `gated: true`). The build-file pattern moved from
+  STRONG to MEDIUM: mentioning a manifest is context, and real asks ("update package.json and
+  run npm install") still score as coding through their verbs/commands.
+- **`src/renderer/app.js`** — `isCodeModeEnabled()` now returns the ⌨ CODE chip state (and is
+  false while an administrator has locked tools); the chip's last choice is restored on load,
+  default OFF. Agent tools and the CODE gate no longer exclude each other (the old exclusivity
+  disabled the CODE box permanently), a live Code run still locks it, and `activeMode()` keeps
+  one conversation so flipping the chip never swaps the visible history. Routing passes
+  `{ allowCode: isCodeModeEnabled() }`, and the one-time routing notice explains the chip.
+- **`index.html` / `src/renderer/ui/modeBar.js`** — a visible **⌨ CODE** chip in the quick-toggle
+  row (off by default), the mode segment is the base AGENT SMITH mode again.
+
+### Provider switch: CT default is 32000 again
+
+Switching the PROVIDER left whatever the other backend last reported in the CT field — an
+embedding model's 512-token window, for example — as if it were a usable chat default.
+`runtimeProfileUI.resetContextForProvider()` now runs on a provider switch: it clears the
+manual override, writes the app-wide minimum (32000, env-overridable via `XK_MIN_CTX`) into the
+slider, the display and the Custom Context field, and asks LM Studio to load exactly that
+window (Ollama needs nothing — `num_ctx` is per request). Reflection also no longer paints a
+**below-minimum** verified window over auto-tune's value: that value is not a default, and
+`ensureMinCtx()` is about to reload at the floor anyway.
+
+### Startup opens at the end of the last conversation
+
+`init()` restored the history (and its rendered snapshot) but never scrolled, so every start
+showed the oldest message of the last session and the user had to scroll — or click "Latest" —
+to see where the conversation actually ended. A single forced scroll is not enough either:
+images, highlighted code and webfonts keep growing the column after the insert, which pushes
+the real end down again. `settleChatToLatest()` now pins the view to the bottom for a 4 s settle
+window after the restore and releases it the moment the user scrolls up on purpose; the
+"Latest" pill and the per-run follow behave as before.
+
+**Deliberately not changed: the model auto-pick.** LM Studio keeps an embedding model loaded
+(`all-minilm`, 512 tokens) and lists it first, so a switch to LM Studio can select it and show
+512 in the tuning field. Filtering embedding models out of the dropdown was tried and reverted:
+it would make the app auto-select the *first chat model in the list* instead, and then load that
+model with a 32000 window — a model the user may never have wanted (too small, too large, or
+unusable for Agent Smith). A wrong CT value the user can correct in one click is the smaller
+cost than an unwanted multi-gigabyte load, so the dropdown and the loaded-model detector keep
+their v52.2 behaviour.
+
+### Verification
+
+- `node --test tests/taskClassifier.test.js tests/minCtxAutoReload.test.js tests/modeBar.test.js
+  tests/autoTuneStartup.test.js tests/modelClassifier.test.js` → 27/27 green (new tests: the
+  `allowCode:false` gate, build-file mentions staying out of Code Mode, and the 32000
+  provider-switch reset).
+- `node --test tests/domFunctionalChecks.test.js tests/runtimeProfileUI.test.js
+  tests/runtimeProfile.test.js tests/modeHistory.test.js tests/rendererLoadOrder.test.js
+  tests/rendererBundleBrowserSafe.test.js tests/ctxGate.test.js` → 51/51 green.
+- `node --check` on every edited script; `dist/renderer/bundle.js` rebuilt.
+- Startup scroll: `node --test tests/rendererLoadOrder.test.js tests/rendererBundleBrowserSafe.test.js`
+  (no headless check for real layout — the settle window is what absorbs late growth).
+
 ## [56.5.0] - 2026-11-02 — 🪟 Ollama gets a bounded window (last 20 messages) + a self-renewing 8-minute lease
 
 > Numbering note: this entry was written as **56.6.0** during development, but that

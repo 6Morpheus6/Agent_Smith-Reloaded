@@ -33,7 +33,7 @@
             <div class="as-brand">
                 <span id="resource-status-dot" class="status-dot" title="Resource Status: Healthy"></span>
                 <h1 class="as-wordmark" data-text="AGENT SMITH RELOADED">AGENT SMITH RELOADED</h1>
-                <span id="app-version" class="as-version">v56.5.0</span>
+                <span id="app-version" class="as-version">v56.5.1</span>
             </div>
             <div class="as-subline">
                 <span class="as-tag">SYSTEM&nbsp;AGENT&nbsp;·&nbsp;LOCAL</span>
@@ -60,10 +60,10 @@
                      the main-process Code engine and everything else (chat + agent work) to
                      the Agent Mode chat path with host-control tools. `code:` / `agent:`
                      prefix forces a route. -->
-                <button type="button" class="mode-seg active" data-mode="code" title="Auto-routing: coding tasks run Code Mode, everything else runs the agent chat path — shell, files anywhere, processes, web">AGENT SMITH</button>
+                <button type="button" class="mode-seg active" data-mode="agent" title="Agent Smith — chat and host control: shell, files anywhere, processes, web. Code Mode only runs when the ⌨ CODE chip is on.">AGENT SMITH</button>
             </div>
             <p id="agent-mode-hint" class="mode-hint" style="display: none;">Full host control: shell, files, web browser, processes.</p>
-            <p id="code-mode-hint" class="mode-hint">Auto-routing — coding tasks get the build pipeline; chat and agent work stay in the conversation. `code:` / `agent:` prefix forces a route.</p>
+            <p id="code-mode-hint" class="mode-hint" style="display: none;">Code Mode is ON — coding tasks run the build pipeline; everything else still chats. Turn the ⌨ CODE chip off to keep every message in the conversation.</p>
 
             <!-- Active model. The project-folder picker now lives as an icon next to
                  the attachment button in the input bar (saves cockpit space). -->
@@ -86,6 +86,10 @@
 
             <!-- Run modifiers — quiet until active. -->
             <div class="chip-row" aria-label="Quick toggles">
+                <!-- v56.5.1: the CODE permission gate. OFF (default) = no message can start a
+                     Code run, no matter which words it contains; ON = detected coding tasks
+                     (or a `code:` prefix) may run the build pipeline. -->
+                <button type="button" class="mode-chip" data-toggle="code-mode-toggle" title="Code Mode — ON: coding tasks run the build pipeline (files are written and verified). OFF: nothing can trigger Code Mode; every message chats or acts with the agent tools.">⌨ CODE</button>
                 <button type="button" class="mode-chip" data-toggle="memory-toggle" title="Cross-session persistent memory">◈ MEM <span id="memory-count-badge" class="memory-count-badge">[0]</span></button>
                 <button type="button" class="mode-chip" data-toggle="image-gen-toggle" title="Image generation — when on, ask Smith to make an image and he renders it locally (Vulkan GPU)">🎨 IMG</button>
                 <button type="button" class="mode-chip" data-toggle="thinking-toggle" title="Model thinking / reasoning. ON = the model may think before answering (LM Studio's setting applies). OFF = Agent Smith FORCES thinking off on every request (chat + Code Mode), regardless of what LM Studio's toggle says — that UI setting does not reliably reach API requests.">🧠 THINK</button>
@@ -274,7 +278,7 @@
                         <div id="code-readiness-chip" class="chip-note" style="display:none;"></div>
                         <div id="code-review-mount"></div>
                     </div>
-                    <p id="code-mode-empty" class="xk-empty-note">Switch to <strong>CODE</strong> mode to build on your project.</p>
+                    <p id="code-mode-empty" class="xk-empty-note">Turn the <strong>⌨ CODE</strong> chip on to let coding tasks build on your project.</p>
                 </div>
             </section>
 

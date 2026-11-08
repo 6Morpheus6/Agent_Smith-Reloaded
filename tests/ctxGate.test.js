@@ -60,6 +60,24 @@ test('reflectLoadedContext clamps into the slider displayable range', () => {
     assert.equal(gate.reflectLoadedContext(0, { managed: true, loadedContext: 999999 }), gate.CTX_SLIDER_MAX);
 });
 
+test('v56.6: defaultLoadCtx never targets a window below the minimum', () => {
+    // LM Studio's own JIT default is 4096 — reflected into the CT field with Auto-tune off.
+    // That number must never become the context a model is LOADED at.
+    assert.equal(gate.defaultLoadCtx(4096), 32000);
+    assert.equal(gate.defaultLoadCtx(0), 32000);
+    assert.equal(gate.defaultLoadCtx(undefined), 32000);
+    assert.equal(gate.defaultLoadCtx('nonsense'), 32000);
+    // A window the user already loaded in LM Studio above the floor is kept, never downgraded.
+    assert.equal(gate.defaultLoadCtx(65536), 65536);
+    assert.equal(gate.defaultLoadCtx('49152'), 49152);
+    // …and the floor follows XK_MIN_CTX like every other ctx decision.
+    process.env.XK_MIN_CTX = '96000';
+    try {
+        assert.equal(gate.defaultLoadCtx(4096), 96000);
+        assert.equal(gate.defaultLoadCtx(131072), 131072);
+    } finally { delete process.env.XK_MIN_CTX; }
+});
+
 test('v51.6 regression: the gate works in a process-less renderer (nodeIntegration:false)', () => {
     // The Electron renderer has `window` but NO global `process`. v51.5's minCtx()
     // referenced process.env unguarded → ReferenceError on every send (the "send button

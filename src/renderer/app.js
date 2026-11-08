@@ -198,6 +198,32 @@ function scrollMessagesToLatest(force) {
 if (messagesContainer && mainChatEl && window.XKScrollFollow) {
     window.XKScrollFollow.mount(messagesContainer, mainChatEl);
 }
+
+// v56.5.1 — OPENING the app lands on the END of the last conversation, not its beginning.
+// A restored history is painted top-down, so the first frame shows the oldest message; and a
+// single forced scroll is not enough either, because late layout (images, highlighted code,
+// webfonts) keeps growing the column after the insert. Pin to the bottom for a short settle
+// window and let go as soon as the user scrolls up on purpose (that choice always wins).
+let settleScrollTimer = null;
+function settleChatToLatest(settleMs) {
+    if (!messagesContainer) return;
+    if (settleScrollTimer) { clearInterval(settleScrollTimer); settleScrollTimer = null; }
+    scrollMessagesToLatest(true);
+    const ms = Number(settleMs) || 4000;
+    const distance = () => messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight;
+    const stop = () => {
+        if (settleScrollTimer) { clearInterval(settleScrollTimer); settleScrollTimer = null; }
+        messagesContainer.removeEventListener('scroll', onScroll);
+    };
+    const onScroll = () => { if (distance() > 160) stop(); };
+    let ticks = 0;
+    messagesContainer.addEventListener('scroll', onScroll, { passive: true });
+    settleScrollTimer = setInterval(() => {
+        ticks += 1;
+        if (ticks * 250 >= ms) { stop(); return; }
+        scrollMessagesToLatest(true);
+    }, 250);
+}
 const userInput = document.getElementById('user-input');
 const sendBtn = document.getElementById('send-btn');
 const stopBtn = document.getElementById('stop-btn');
@@ -492,6 +518,9 @@ const codeRunState = window.XKRunState?.codeRunState || { isBusy: false, abortCo
 const sendSlot = window.XKSendSlot?.createSendSlot({ chatRunState, codeRunState })
     || { isBusy: () => false, claim: () => true, release: () => {} }; // bundle missing — degrade to old behavior
 let codeModeHandler = null;
+// v56.5.1 — set when an administrator takes the tool surface away (canUseTools=false). While
+// set, the CODE gate cannot be switched on, no matter what the checkbox/last choice says.
+let codeModePermissionLocked = false;
 
 (function migrateLocalStorageKeys() {
     const suffixes = ['build_mode', 'code_mode', 'agent_mode', 'workspace', 'section_collapsed'];
@@ -518,13 +547,15 @@ let codeModeHandler = null;
 // message is routed by src/shared/taskClassifier.js: a detected CODING task runs the
 // main-process Code engine (project build pipeline); everything else — plain chat plus
 // ordinary agent tasks (organize files, check disk, read logs) — runs the Agent Mode
-// chat path with its full host-control tool surface. The v50 bug was that BOTH getters
-// below were hard-coded (`isCodeModeEnabled() { return true; }`), so EVERY message ran
-// the build pipeline and the agent could barely chat. Routing now happens in
-// sendMessage() per message — these getters describe the conversation's run context,
-// not a global mode lock. The hidden mode checkboxes stay in the DOM so all legacy
-// bindings keep working.
-function isCodeModeEnabled() { return false; }
+// chat path with its full host-control tool surface.
+//
+// v56.5.1 — THE CODE GATE. The v51.2 release hard-wired this getter to `false` and left the
+// classifier routing on its own, so the CODE switch did nothing and ordinary questions that
+// merely mentioned a build file ("where is cargo.toml?") were silently turned into Code
+// runs. The CODE chip (code-mode-toggle) is now the single permission switch: ON lets a
+// coding task — classifier hit or an explicit `code:` prefix — start a Code run; OFF means
+// NOTHING can route there and every message takes the chat/agent path.
+function isCodeModeEnabled() { return codeModeToggle?.checked === true && !codeModePermissionLocked; }
 
 function isAgentModeEnabled() { return true; }
 
@@ -567,33 +598,30 @@ function updateCodeModeUI() {
 
 function enforceModeExclusivity() {
     const codeOn = isCodeModeEnabled();
-    let agentOn = agentToggle?.checked === true;
+    const agentOn = isAgentModeEnabled();
 
-    if (codeOn && agentOn && agentToggle) {
-        agentToggle.checked = false;
-        agentOn = false;
-        try { localStorage.setItem('agentsmith_agent_mode', 'false'); } catch (e) { /* non-fatal */ }
-    }
-    if (agentOn && codeModeToggle?.checked) {
-        codeModeToggle.checked = false;
-        try { localStorage.setItem('agentsmith_code_mode', 'false'); } catch (e) { /* non-fatal */ }
-    }
-
+    // v56.5.1 — CODE is a permission gate layered ON TOP of the agent chat path, so the two no
+    // longer exclude each other. The old code unchecked the agent toggle the moment CODE came
+    // on, then disabled the CODE checkbox forever because agent mode is always on — which is
+    // why the switch could never be used. The agent tool surface stays available for every
+    // message; only a live Code run (setCodeLock) or an admin permission locks the CODE box.
     const agentRow = agentToggle?.closest('.toggle-row');
     if (agentToggle) {
-        agentToggle.disabled = codeOn || !!codeRunState.isBusy;
+        agentToggle.disabled = !!codeRunState.isBusy;
         if (agentRow) {
-            agentRow.style.opacity = (codeOn || codeRunState.isBusy) ? '0.5' : '';
-            agentRow.title = codeOn ? 'Disabled while Code Mode is on' : '';
+            agentRow.style.opacity = codeRunState.isBusy ? '0.5' : '';
+            agentRow.title = codeRunState.isBusy ? 'Disabled while a Code run is active' : '';
         }
     }
 
     const codeRow = codeModeToggle?.closest('.toggle-row');
-    if (codeModeToggle && !codeRunState.isBusy) {
-        codeModeToggle.disabled = agentOn;
+    if (codeModeToggle) {
+        codeModeToggle.disabled = !!codeRunState.isBusy || codeModePermissionLocked;
         if (codeRow) {
-            codeRow.style.opacity = agentOn ? '0.5' : '';
-            codeRow.title = agentOn ? 'Disabled while Agent Mode is on' : '';
+            codeRow.style.opacity = codeModeToggle.disabled ? '0.5' : '';
+            codeRow.title = codeModePermissionLocked
+                ? 'Disabled by Administrator'
+                : (codeRunState.isBusy ? 'Locked while Code Mode is running' : '');
         }
     }
 
@@ -607,17 +635,19 @@ function enforceModeExclusivity() {
         if (row) row.style.opacity = blockNet ? '0.5' : '';
     });
 
-    if (agentModeHint) agentModeHint.style.display = agentOn ? 'block' : 'none';
     if (codeModeHint) codeModeHint.style.display = codeOn ? 'block' : 'none';
 }
 
 function setCodeLock(locked) {
     if (!codeModeToggle) return;
-    codeModeToggle.disabled = !!locked;
+    // v56.5.1: a run end must never hand the CODE switch back to a user who has no tool rights.
+    codeModeToggle.disabled = !!locked || codeModePermissionLocked;
     const row = codeModeToggle.closest('.toggle-row');
     if (row) {
-        row.style.opacity = locked ? '0.6' : '';
-        row.title = locked ? 'Locked while Code Mode is running' : '';
+        row.style.opacity = codeModeToggle.disabled ? '0.6' : '';
+        row.title = codeModePermissionLocked
+            ? 'Disabled by Administrator'
+            : (locked ? 'Locked while Code Mode is running' : '');
     }
 }
 
@@ -643,19 +673,14 @@ async function showCodeReview(sessionId) {
 }
 
 if (codeModeToggle) {
-    // v51.2: the code engine is routed PER MESSAGE by taskClassifier.js — a manual
-    // "always on" lock is gone (that was the v50 bug). The checkbox survives for legacy
-    // binding compatibility; routing reads sendMessage()'s classifier, not this box.
-    codeModeToggle.checked = false;
+    // v56.5.1: this checkbox (mirrored by the ⌨ CODE chip) is a REAL permission switch now, so
+    // the last choice is restored across restarts. Default OFF — no message starts a Code run
+    // until the user asks for it.
+    try { codeModeToggle.checked = localStorage.getItem('agentsmith_code_mode') === 'true'; } catch (e) { codeModeToggle.checked = false; }
     if (agentToggle) { agentToggle.checked = true; }
-    try { localStorage.setItem('agentsmith_code_mode', 'false'); } catch (e) { /* non-fatal */ }
     codeModeToggle.addEventListener('change', () => {
         if (codeModeToggle.disabled) return;
-        if (codeModeToggle.checked && agentToggle?.checked) {
-            agentToggle.checked = false;
-            localStorage.setItem('agentsmith_agent_mode', 'false');
-        }
-        localStorage.setItem('agentsmith_code_mode', codeModeToggle.checked ? 'true' : 'false');
+        try { localStorage.setItem('agentsmith_code_mode', codeModeToggle.checked ? 'true' : 'false'); } catch (e) { /* non-fatal */ }
         updateCodeModeUI();
     });
     setCodeLock(false);
@@ -1023,7 +1048,7 @@ if (ollamaServerInput) {
 
 // v56.4: PROVIDER dropdown — switch the whole app between LM Studio and Ollama.
 if (providerSelect) {
-    providerSelect.addEventListener('change', () => {
+    providerSelect.addEventListener('change', async () => {
         setProvider(providerSelect.value);
         userPickedModel = false; // new backend — resume default model-following
         // A queued LM Studio swap must not fire against the NEW provider's URL later.
@@ -1032,7 +1057,10 @@ if (providerSelect) {
         // VRAM at a time. Queued while a run still talks to it, flushed at run end.
         freeOtherBackendAtSafeBoundary();
         notifyHostBackend();
-        fetchModels();
+        try { await fetchModels(); } catch (e) { /* reported in the model picker */ }
+        // v56.5.1: a provider switch starts from the app default context (32000) — never the
+        // tiny window the other backend last reported (e.g. an embedding model's 512).
+        try { await window.XKRuntimeProfileUI?.resetContextForProvider?.(); } catch (e) { /* advisory */ }
         checkConnection();
     });
 }
@@ -1151,7 +1179,10 @@ let chatHistory = [];
 // and abort app.js (which silently broke login).
 
 function activeMode() {
-    return isCodeModeEnabled() ? 'code' : (isAgentModeEnabled() ? 'agent' : 'chat');
+    // v56.5.1: one conversation. The CODE chip is a per-message permission gate, not a separate
+    // chat mode, so flipping it must never swap the visible conversation/history out from
+    // under the user — Code runs and their summaries live in the same agent history.
+    return 'agent';
 }
 function seedHistory(mode) {
     const base = currentSystemPrompt ? [{ role: 'system', content: currentSystemPrompt }] : [];
@@ -1856,6 +1887,7 @@ function hideLogin(user) {
     }
 
     if (!user.permissions.canUseTools) {
+        codeModePermissionLocked = true;
         agentToggle.checked = false;
         agentToggle.disabled = true;
         agentToggle.parentElement.style.opacity = '0.5';
@@ -1870,11 +1902,12 @@ function hideLogin(user) {
             }
         }
     } else {
+        codeModePermissionLocked = false;
         agentToggle.disabled = false;
         agentToggle.parentElement.style.opacity = '1';
         agentToggle.parentElement.title = '';
         if (codeModeToggle && !codeRunState.isBusy) {
-            codeModeToggle.disabled = isAgentModeEnabled();
+            codeModeToggle.disabled = false;
         }
     }
 
@@ -2136,6 +2169,8 @@ async function init() {
             renderHistory();
         }
         updateEmptyState();
+        // v56.5.1: open at the last message of the restored session (see settleChatToLatest).
+        settleChatToLatest();
         updateMemoryCount();
 
 
@@ -2325,7 +2360,8 @@ function modelSwapBusy() {
 }
 
 // Context to load the selection at: auto-tune's profile for THAT model when enabled
-// (the slider may still show the previous model's value), otherwise the current slider.
+// (the slider may still show the previous model's value), otherwise the current slider —
+// never below the app-wide minimum unless the user set that value explicitly (v56.6).
 async function targetContextForModel(modelId) {
     try {
         const fn = window.XKRuntimeProfile?.buildRuntimeProfile;
@@ -2337,7 +2373,18 @@ async function targetContextForModel(modelId) {
             if (profile && Number.isFinite(profile.numCtx)) return profile.numCtx;
         }
     } catch (e) { /* fall through to the slider */ }
-    return parseInt(ctxSlider?.value || '8192', 10);
+    // v56.6 — NEVER LOAD BELOW THE APP MINIMUM. With auto-tune off the CT field only MIRRORS
+    // what LM Studio happens to have loaded, and LM Studio's own JIT default is 4096: that
+    // reflected number is not a user choice, and a window under the gate's floor can never be
+    // used (every send is blocked). So the DEFAULT load target is the app-wide minimum
+    // (32000). An explicit tuning value (slider drag / Custom Context APPLY → override flag)
+    // is honored as typed, and a reflected window ABOVE the floor is kept, never downgraded.
+    const fromSlider = parseInt(ctxSlider?.value || '8192', 10);
+    if (localStorage.getItem('agentsmith_profile_override') === 'true') return fromSlider;
+    // ctxGate owns the floor (32000, env-overridable) — see defaultLoadCtx().
+    const gate = window.XKCtxGate;
+    if (typeof gate?.defaultLoadCtx === 'function') return gate.defaultLoadCtx(fromSlider);
+    return Math.max(32000, Number.isFinite(fromSlider) ? fromSlider : 32000);
 }
 
 async function handleModelSwap() {
@@ -3404,16 +3451,19 @@ async function sendMessage() {
     // expects their pick to be what answers them (and it's safe: no inference in flight).
     try { if (typeof globalThis.flushPendingModelSwap === 'function') await globalThis.flushPendingModelSwap(); } catch (e) { /* optional */ }
 
-    // v51.2 PER-MESSAGE ROUTING — classify THIS message (taskClassifier.js). Coding task →
-    // Code engine; chat / ordinary agent work → the Agent Mode chat path with its host-
-    // control tools. `code: <prompt>` / `agent: <prompt>` prefix forces a route (the token
-    // is stripped from the prompt). The v50 bug routed everything to code — no more.
+    // v51.2 PER-MESSAGE ROUTING — classify THIS message (taskClassifier.js). v56.5.1: the ⌨ CODE
+    // chip gates the whole route — with it OFF, `allowCode: false` makes the classifier's word
+    // lists and even a `code:` prefix unable to start a Code run, so a question always gets a
+    // chat/agent answer. With it ON, a coding task may run the Code engine.
     // Classify on the user's own words + attached FILE NAMES (not file contents, so an
     // attached source file doesn't drag "explain this" into Code Mode).
     const routeInput = [text, ...attachedFiles.map(f => f.fileName)].filter(Boolean).join(' ');
-    const routing = window.XKTaskClassifier?.routeMessage ? window.XKTaskClassifier.routeMessage(routeInput) : { mode: 'code', prompt: text, override: false };
-    let codeModeEnabled = routing.mode === 'code';
-    let agentEnabled = routing.mode === 'agent';
+    const codeGateOn = isCodeModeEnabled();
+    const routing = window.XKTaskClassifier?.routeMessage
+        ? window.XKTaskClassifier.routeMessage(routeInput, { allowCode: codeGateOn })
+        : { mode: 'agent', prompt: text, override: false };
+    let codeModeEnabled = codeGateOn && routing.mode === 'code';
+    let agentEnabled = !codeModeEnabled;
 
     // A coding task in an ACTIVE Code run (plan awaiting approval / execution mid-flight):
     // the engine is busy with that project — keep the message inside the code conversation.
@@ -3592,7 +3642,7 @@ My Query: ${text}`;
             if (freshCodeRoute) {
                 try {
                     if (!localStorage.getItem('agentsmith_v512_route_notice')) {
-                        addMessage('system', '**Auto-routing on:** coding tasks run Code Mode; everything else chats or acts with the agent tools. Prefix a message with `code:` or `agent:` to force a route.');
+                        addMessage('system', '**Code Mode is on:** coding tasks run the build pipeline; everything else chats with the agent tools. Turn the ⌨ CODE chip off to keep every message in the conversation.');
                         localStorage.setItem('agentsmith_v512_route_notice', 'true');
                     }
                 } catch (e) { /* non-fatal */ }

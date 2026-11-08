@@ -11,8 +11,11 @@
  *           anywhere, web, memory) — also the plain-chat destination.
  *
  * Routing order in `routeMessage`:
- *   1. explicit override tokens (`code:` / `agent:` prefix) — strip + honor
- *   2. scoring heuristics — strong coding signals outweigh file-management
+ *   1. the CODE gate — with `{ allowCode: false }` (the CODE chip is OFF) NOTHING may
+ *      route to the code engine: no heuristic and no `code:` prefix. A plain question
+ *      always gets a plain answer.
+ *   2. explicit override tokens (`code:` / `agent:` prefix) — strip + honor
+ *   3. scoring heuristics — strong coding signals outweigh file-management
  *      negatives; ambiguous input goes to agent (chat stays chat).
  */
 'use strict';
@@ -31,7 +34,6 @@ const STRONG_CODING_RES = [
     /\b(debug|fix|patch|resolve)\b.{0,50}(?:\b(this\b|\bmy\b|\bour\b|\bthe\b).{0,30}\b(code|app|script|project|module|function|class|component|endpoint)\b)/i,
     /\btest\s*[- ]?(suite|runner|coverage)\b/i,
     /\bnpm (?:install|i|run|test|build|start)\b|\bpnpm (?:install|run)\b|\byarn (?:add|install|run)\b|\bpip install\b|\bgit init\b/i,
-    /package\.json|requirements\.txt|pyproject\.toml|cargo\.toml|go\.mod|tsconfig\.json/i,
 ];
 
 // Medium coding signals: programming context present. +1 each.
@@ -42,6 +44,12 @@ const MEDIUM_CODING_RES = [
     /\bgit (?:commit|branch|merge|push|pull|clone|init)\b/i,
     /\b(compile|compilation|type\s?check|linter|linting|minify|transpile)\b/i,
     /stack ?trace/i,
+    // v56.5.1: MENTIONING a build file is context, not a task. A bare `cargo.toml` /
+    // `package.json` used to be a STRONG signal, so "where is cargo.toml?" started a full
+    // Code Mode build that could only end in "no files written". As a medium signal the
+    // word still helps real build asks ("update package.json and run npm install") without
+    // hijacking questions.
+    /package\.json|requirements\.txt|pyproject\.toml|cargo\.toml|go\.mod|tsconfig\.json/i,
 ];
 
 // Negative signals: the ask is file/host management or research, not code authorship. -2 each.
@@ -87,15 +95,29 @@ function scoreText(text) {
 /**
  * Route one user message to its run type.
  * @param {string} text raw user input (before attachment appending).
- * @returns {{ mode: 'code'|'agent', prompt: string, override: boolean }}
+ * @param {{ allowCode?: boolean }} [opts] allowCode=false is the CODE-gate "off" state: the
+ *   message can only run as agent/chat, and a `code:` prefix cannot override that.
+ * @returns {{ mode: 'code'|'agent', prompt: string, override: boolean, gated?: boolean }}
  */
-function routeMessage(text) {
+function routeMessage(text, opts = {}) {
     const t = String(text == null ? '' : text);
+    const allowCode = opts.allowCode !== false;
     const m = OVERRIDE_RE.exec(t);
     if (m) {
-        return { mode: m[1].toLowerCase() === 'agent' ? 'agent' : 'code', prompt: t.slice(m[0].length), override: true };
+        const wanted = m[1].toLowerCase() === 'agent' ? 'agent' : 'code';
+        const mode = (wanted === 'code' && !allowCode) ? 'agent' : wanted;
+        return {
+            mode,
+            prompt: t.slice(m[0].length),
+            override: true,
+            ...(wanted !== mode ? { gated: true } : {})
+        };
     }
-    return { mode: isCodingTask(t) ? 'code' : 'agent', prompt: t, override: false };
+    return {
+        mode: (allowCode && isCodingTask(t)) ? 'code' : 'agent',
+        prompt: t,
+        override: false
+    };
 }
 
 const api = { scoreText, isCodingTask, routeMessage, analyze, CODE_THRESHOLD };

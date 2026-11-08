@@ -17,10 +17,10 @@
         const fire = (el) => { if (el) el.dispatchEvent(new Event('change', { bubbles: true })); };
 
         function currentMode() {
-            // v50: single unified harness — the bar is presentational and always shows code.
-            if (code && code.checked) return 'code';
-            if (agent && agent.checked) return 'agent';
-            return 'code';
+            // v56.5.1: the bar is the base AGENT SMITH mode — one conversation, one history.
+            // Code Mode is a per-message permission gate (the ⌨ CODE chip), not a segment,
+            // so turning it on must not make this control look like no mode is selected.
+            return 'agent';
         }
 
         function sync() {

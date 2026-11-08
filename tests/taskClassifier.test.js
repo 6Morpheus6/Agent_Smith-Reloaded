@@ -75,6 +75,44 @@ test('routeMessage returns mode, prompt and override flag', () => {
     assert.equal(r2.override, false);
 });
 
+// --- v56.5.1: the CODE gate -------------------------------------------------------
+
+test('allowCode:false makes the CODE switch authoritative — nothing routes to code mode', () => {
+    const builds = [
+        'Build a todo app in Python with SQLite storage and tests',
+        'Fix the null pointer exception in src/auth/login.js',
+        'code: build me a snake game'
+    ];
+    for (const t of builds) {
+        const r = routeMessage(t, { allowCode: false });
+        assert.equal(r.mode, 'agent', `expected AGENT with the gate off: "${t}"`);
+    }
+    // The override token is still stripped from the prompt (and reported as gated).
+    const forced = routeMessage('code: build me a snake game', { allowCode: false });
+    assert.equal(forced.prompt, 'build me a snake game');
+    assert.equal(forced.override, true);
+    assert.equal(forced.gated, true);
+
+    // The gate is ON by default, so the classifier keeps working for code tasks.
+    assert.equal(routeMessage('Build a todo app in Python').mode, 'code');
+    assert.equal(routeMessage('Build a todo app in Python', { allowCode: true }).mode, 'code');
+});
+
+test('mentioning a build file is context, not a coding task', () => {
+    // v56.5.1 regression: "where is cargo.toml?" started a full Code run that could only end
+    // in "no files written in N turns".
+    const questions = [
+        'Where is cargo.toml in this project?',
+        'Kannst du mir sagen wo package.json liegt?',
+        'What does tsconfig.json control?'
+    ];
+    for (const t of questions) {
+        assert.ok(!isCodingTask(t), `expected NOT coding: "${t}" (score ${scoreText(t)})`);
+    }
+    // Real build asks that name the file still route to code mode.
+    assert.ok(isCodingTask('Update package.json to add a test script and run npm install'));
+});
+
 test('code: and agent: prefixes force the route and are stripped', () => {
     // "fix my code" alone is NOT a build task — but the user said CODE.
     const r1 = routeMessage('code: fix my code');

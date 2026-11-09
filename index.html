@@ -266,8 +266,8 @@
                          (hidden unless Auto-tune is off); the live status/readiness live here. -->
                     <div id="code-mode-ui" class="sb-subpanel-plain" style="display: none;">
                         <div class="param-group" id="manual-ctx-field">
-                            <div class="param-row"><label for="ctx-slider">Context Window</label><span class="param-val" id="ctx-val">8192</span></div>
-                            <input type="range" id="ctx-slider" min="2048" max="262144" step="1024" value="8192">
+                            <div class="param-row"><label for="ctx-slider">Context Window</label><span class="param-val" id="ctx-val">32000</span></div>
+                            <input type="range" id="ctx-slider" min="2048" max="262144" step="128" value="32000">
                             <!-- v55.9.2: explicit APPLY — set ANY context (incl. above 32K) and press it to
                                  reload LM Studio at exactly that window; the slider then mirrors what loaded. -->
                             <div class="sb-row" style="margin-top:0.4rem;">

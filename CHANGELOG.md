@@ -62,6 +62,28 @@ unusable for Agent Smith). A wrong CT value the user can correct in one click is
 cost than an unwanted multi-gigabyte load, so the dropdown and the loaded-model detector keep
 their v52.2 behaviour.
 
+### The startup VRAM dip: the slider default restarted the Ollama runner
+
+The context slider shipped with `value="8192"` while the app-wide floor is 32000. With the
+Ollama provider the app sends the slider value 1:1 as `num_ctx`, and the floor is only applied
+for LM Studio (`runtimeProfileUI` returns `null` for Ollama), so the first message after a
+32000-context model was preloaded asked Ollama for an 8192 window. Ollama cannot serve that
+from the resident runner: it dropped the model, reloaded it at 8192 and the VRAM graph dipped
+to the smaller 8k KV cache — even though every load was fast. Measured in `server.log`: a
+preload (`POST /api/generate`) logging `load_model … n_ctx_slot = 32000`, then the first
+`POST /api/chat` at boot logging `load_model … n_ctx_slot = 8192` (4.6 s) with a visible dip
+between the two plateaus.
+
+- **`index.html`** — `ctx-slider` starts at `value="32000"` (the `ctx-val` readout with it), so
+the app and the preload ask for the same window. The first message now streams from the
+resident runner instead of forcing a reload.
+- **`step` 1024 → 128** — Chrome snaps a range value to `min + n*step`, and
+  `2048 + 29*1024 = 31744`: 32000 was not representable and the slider reported 31744.
+  `32000 = 2048 + 249*128` exactly. This also fixed `resetContextForProvider()`, whose 32000
+  write (added above) silently landed on 31744 and asked LM Studio for a window it never got.
+- The `|| 8192` fallbacks in `app.js` stay: they only apply when the slider element is missing
+  (headless or a broken DOM), never in normal use.
+
 ### Verification
 
 - `node --test tests/taskClassifier.test.js tests/minCtxAutoReload.test.js tests/modeBar.test.js
@@ -74,6 +96,9 @@ their v52.2 behaviour.
 - `node --check` on every edited script; `dist/renderer/bundle.js` rebuilt.
 - Startup scroll: `node --test tests/rendererLoadOrder.test.js tests/rendererBundleBrowserSafe.test.js`
   (no headless check for real layout — the settle window is what absorbs late growth).
+- Context slider: headless Chrome reads `value="32000"` as the attribute and returns 32000 after
+  a programmatic set (it returned 31744 with `step="1024"`). With a 32000 preload resident, a
+  booted UI issued no second runner load and `/api/ps` stayed at `context_length: 32000`.
 
 ## [56.5.0] - 2026-11-02 — 🪟 Ollama gets a bounded window (last 20 messages) + a self-renewing 8-minute lease
 

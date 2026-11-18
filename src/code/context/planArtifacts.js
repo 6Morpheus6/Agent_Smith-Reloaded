@@ -16,6 +16,16 @@ const MILESTONE_RE = /^-\s*\[([ xX])\]\s*\*\*(M\d+|Final)[^*]*\*\*[^|]*\|\s*veri
 const MILESTONE_E2E_RE = /^-\s*\[([ xX])\]\s*\*\*(M\d+|Final)[^*]*\*\*[^|]*\|\s*e2e:\s*`([^`]+)`/gm;
 const MILESTONE_SIMPLE = /^-\s*\[([ xX])\]\s*\*\*(M\d+|Final)/gm;
 
+/**
+ * True for the harness-managed bookkeeping tree (.agentsmith/...). Those files are NOT
+ * deliverables: the harness writes them itself, and letting them count as touched files /
+ * edits turns a plan-log edit into fake build progress (and feeds a write-log loop).
+ */
+function isArtifactPath(p) {
+    const norm = String(p || '').replace(/\\/g, '/').replace(/^\.?\//, '');
+    return norm === ARTIFACT_DIR || norm.startsWith(ARTIFACT_DIR + '/');
+}
+
 function artifactDir(projectRoot) {
     return path.join(projectRoot, ARTIFACT_DIR);
 }
@@ -313,6 +323,7 @@ class PlanArtifacts {
 module.exports = {
     PlanArtifacts,
     ARTIFACT_DIR,
+    isArtifactPath,
     isNonTrivialTask,
     planPath,
     implementPath

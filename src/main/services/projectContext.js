@@ -2,6 +2,35 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+// Windows PowerShell 5.1 (powershell.exe, shipped with every supported Windows) rejects
+// `&&` and `||` at PARSE time: "The token '&&' is not a valid statement separator in this
+// version." The command never runs, so the model sees exit 1 with an EMPTY stdout and has
+// no idea why. Models write bash-style chains constantly, so a run burns turns re-probing
+// a command that was fine. PowerShell 7 (pwsh.exe) parses both operators — prefer it when
+// the machine has it, and fall back to 5.1 (the schema description tells the model the
+// portable form: `;` plus `$LASTEXITCODE`).
+let pwshResolved = false;
+let pwshPath = null;
+
+function resolvePwsh() {
+    if (pwshResolved) return pwshPath;
+    pwshResolved = true;
+    const candidates = [];
+    const pathEnv = process.env.PATH || process.env.Path || '';
+    for (const dir of pathEnv.split(path.delimiter)) {
+        if (dir) candidates.push(path.join(dir, 'pwsh.exe'));
+    }
+    for (const base of [process.env.ProgramW6432, process.env.ProgramFiles]) {
+        if (base) candidates.push(path.join(base, 'PowerShell', '7', 'pwsh.exe'));
+    }
+    for (const candidate of candidates) {
+        try {
+            if (fs.existsSync(candidate)) { pwshPath = candidate; break; }
+        } catch (e) { /* unreadable PATH entry — keep looking */ }
+    }
+    return pwshPath;
+}
+
 function expandTilde(filepath) {
     if (!filepath) return filepath;
     if (filepath.startsWith('~/')) {
@@ -237,7 +266,7 @@ class ProjectContext {
 
     getShellConfig() {
         if (this.isWindows()) {
-            return { shell: 'powershell.exe', flag: '-NoProfile', commandFlag: '-Command' };
+            return { shell: resolvePwsh() || 'powershell.exe', flag: '-NoProfile', commandFlag: '-Command' };
         }
         // /bin/sh, not bash: bash is absent on Alpine/slim Docker/minimal Linux, where a
         // background spawn('bash', …) fails. The foreground path (exec) also defaults to sh.

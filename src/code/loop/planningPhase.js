@@ -59,6 +59,7 @@ async function runPlanningPhase(ctx) {
         const result = await stream({
             apiBaseUrl,
             apiKey: apiKey || null,
+            provider: ctx.provider || null,
             model,
             messages: bodyMessages,
             tools,

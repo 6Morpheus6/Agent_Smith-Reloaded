@@ -69,17 +69,66 @@ test('edit IPC: no active plan → error without calling editEngine; with plan �
     assert.equal(invalidateRepoMap.calls.length, 1, 'repo map invalidated on success');
 });
 
-test('project IPC: get-root uses getRootOrNull() then falls back to getRoot()', async () => {
+test('project IPC: the workspace survives a restart, and no workspace is null (never cwd)', async () => {
     const registerProjectIpc = require('../src/main/ipc/project.js');
-    {
-        const { ipcMain, h } = fakeIpc();
-        registerProjectIpc(ipcMain, { projectContext: { getRootOrNull: () => null, getRoot: () => '/FALLBACK', setRoot: () => ({}), resolvePath: () => ({}) } });
-        assert.deepEqual(await h('project-get-root')({}), { projectRoot: '/FALLBACK' });
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'as-userdata-'));
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'as-workspace-'));
+
+    // In-memory root with the real setRoot contract (must exist + be a directory).
+    function freshContext() {
+        let root = null;
+        return {
+            getRootOrNull: () => root,
+            getRoot: () => root || process.cwd(),
+            resolvePath: () => ({}),
+            setRoot(p) {
+                if (!p) return { error: 'Empty path' };
+                if (!fs.existsSync(p) || !fs.statSync(p).isDirectory()) return { error: `Path does not exist: ${p}` };
+                root = path.resolve(p);
+                return { success: true, projectRoot: root };
+            }
+        };
     }
+
+    // 1. Fresh install: nothing picked. The harness must say so — its own folder is not a workspace.
     {
         const { ipcMain, h } = fakeIpc();
-        registerProjectIpc(ipcMain, { projectContext: { getRootOrNull: () => '/SET', getRoot: () => '/FALLBACK', setRoot: () => ({}), resolvePath: () => ({}) } });
-        assert.deepEqual(await h('project-get-root')({}), { projectRoot: '/SET' });
+        registerProjectIpc(ipcMain, { projectContext: freshContext(), userDataPath: userData });
+        const r = await h('project-get-root')({});
+        assert.equal(r.projectRoot, null, 'no workspace must be null, not process.cwd()');
+        assert.notEqual(r.cwd, undefined);
+        assert.equal(r.restoreError, null);
+    }
+
+    // 2. Picking a folder writes it through.
+    {
+        const { ipcMain, h } = fakeIpc();
+        registerProjectIpc(ipcMain, { projectContext: freshContext(), userDataPath: userData });
+        const set = await h('project-set-root')({}, workspace);
+        assert.equal(set.success, true);
+        assert.ok(fs.existsSync(path.join(userData, 'workspace.json')), 'workspace persisted to userData');
+    }
+
+    // 3. Restart: a brand-new context (the main process starts blank) restores it by itself.
+    {
+        const { ipcMain, h } = fakeIpc();
+        registerProjectIpc(ipcMain, { projectContext: freshContext(), userDataPath: userData });
+        const r = await h('project-get-root')({});
+        assert.equal(r.projectRoot, path.resolve(workspace), 'workspace restored after restart');
+    }
+
+    // 4. Saved folder deleted between sessions: report it, and drop the dead path.
+    fs.rmSync(workspace, { recursive: true, force: true });
+    {
+        const { ipcMain, h } = fakeIpc();
+        registerProjectIpc(ipcMain, { projectContext: freshContext(), userDataPath: userData });
+        const r = await h('project-get-root')({});
+        assert.equal(r.projectRoot, null);
+        assert.match(r.restoreError || '', /no longer usable/);
+        assert.equal(fs.existsSync(path.join(userData, 'workspace.json')), false, 'stale path forgotten');
     }
 });
 

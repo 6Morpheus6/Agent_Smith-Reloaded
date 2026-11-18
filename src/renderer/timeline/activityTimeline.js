@@ -15,6 +15,12 @@
     let thinkingEl = null;
     let anchorEl = null;
     let streamText = '';
+    // The model's own words between tool calls ("the wrapper is swallowing my $…", a
+    // conclusion, a mid-run report). Unlike reasoning these are real output, so they get a
+    // persistent block of their own instead of living in the reasoning panel that is
+    // wiped on the next turn.
+    let noteEl = null;
+    let noteText = '';
 
     function escapeHtml(s) {
         if (diffView && diffView.escapeHtml) return diffView.escapeHtml(s);
@@ -138,6 +144,8 @@
         currentTurnEl = null;
         thinkingEl = null;
         streamText = '';
+        noteEl = null;
+        noteText = '';
     }
 
     function setAnchor(el) {
@@ -187,6 +195,36 @@
 
     function collapseThinking() {
         if (thinkingEl) thinkingEl.open = false;
+    }
+
+    function ensureNoteBlock() {
+        if (noteEl && noteEl.parentNode) return noteEl;
+        const el = document.createElement('div');
+        el.className = 'activity-note';
+        noteText = '';
+        insertBeforeAnchor(el);
+        noteEl = el;
+        return el;
+    }
+
+    // Commit the streamed text of the current turn: markdown once, at the end. While the
+    // tokens arrive the block holds plain text (cheap to repaint, no markdown parse per
+    // token). An empty block (no content this turn) is dropped.
+    function finalizeNote() {
+        if (!noteEl) {
+            noteText = '';
+            return;
+        }
+        const text = noteText.trim();
+        if (!text) {
+            if (noteEl.parentNode) noteEl.remove();
+        } else {
+            noteEl.classList.add('activity-note--md');
+            if (deps.markedParse) noteEl.innerHTML = deps.markedParse(text);
+            else noteEl.textContent = text;
+        }
+        noteEl = null;
+        noteText = '';
     }
 
     // Reasoning streams from weak/local models often contain raw JSON tool-call
@@ -268,6 +306,7 @@
             if (result.stdout) parts.push(result.stdout);
             if (result.stderr) parts.push(result.stderr);
             if (result.error) parts.push(result.error);
+            if (result.verification_warning) parts.push(String(result.verification_warning));
             return parts.join('\n') || '(no output)';
         }
         if (name === 'list_project' && result.tree) {
@@ -311,6 +350,7 @@
             return 'Project tree mapped';
         case 'run_command':
         case 'run_shell_command': {
+            if (result.verification_warning) return 'No verification (shell state, not a result)';
             const out = String(result.stdout || '').trim();
             return out ? out.split('\n')[0].slice(0, 120) : 'Command finished';
         }
@@ -443,8 +483,9 @@
 
         case 'turn_start':
             ensureTurnHeader(ev.turn);
-            // Collapse the previous task's reasoning when the next task begins, and
-            // start fresh so each turn's "Thinking" shows only that turn's reasoning.
+            // Commit the previous turn's spoken text (it stays), then reset only the
+            // reasoning panel so each turn's "Thinking" shows that turn's reasoning.
+            finalizeNote();
             collapseThinking();
             thinkingEl = null;
             streamText = '';
@@ -506,16 +547,36 @@
             }
             break;
 
+        case 'assistant_delta': {
+            const el = ensureNoteBlock();
+            noteText += ev.text || '';
+            el.textContent = noteText;
+            scrollBottom();
+            break;
+        }
+
+        // 'delta' = pre-split events from a run started by an older build (merged
+        // content + reasoning) — keep rendering those into the reasoning panel.
+        case 'reasoning_delta':
         case 'delta':
             streamText += ev.text || '';
             {
                 const det = ensureThinkingBlock();
                 const body = det.querySelector('.activity-thinking-body');
                 const cleaned = cleanReasoningText(streamText);
-                if (body && deps.markedParse) {
-                    body.innerHTML = deps.markedParse(cleaned || '_Thinking…_');
-                } else if (body) {
-                    body.textContent = cleaned || 'Thinking…';
+                if (body) {
+                    // v56.5.3: this replace resets the reasoning body's scroll box on EVERY
+                    // delta, which pushed the reader back to the top of the panel while the
+                    // model kept thinking. Follow new thoughts while the reader is pinned to
+                    // the bottom; hold their position if they scrolled up to re-read.
+                    const pinned = (body.scrollHeight - body.scrollTop - body.clientHeight) <= 24;
+                    const top = body.scrollTop;
+                    if (deps.markedParse) {
+                        body.innerHTML = deps.markedParse(cleaned || '_Thinking…_');
+                    } else {
+                        body.textContent = cleaned || 'Thinking…';
+                    }
+                    body.scrollTop = pinned ? body.scrollHeight : top;
                 }
                 const sum = det.querySelector('summary');
                 if (sum) {
@@ -534,6 +595,9 @@
 
 
         case 'tool_start':
+            // The text that preceded this call is a finished thought — commit it as
+            // markdown and start a fresh block for whatever the model says next.
+            finalizeNote();
             appendToolRow(ev.callId || `tool_${Date.now()}`, ev.name, ev.args || {});
             break;
 
@@ -554,6 +618,7 @@
             break;
 
         case 'assistant_done':
+            finalizeNote();
             collapseThinking();
             streamText = ev.content || streamText;
             if (anchorEl && deps.markedParse) {
@@ -563,6 +628,7 @@
             break;
 
         case 'done':
+            finalizeNote();
             collapseThinking();
             if (currentTurnEl) currentTurnEl.classList.add('done');
             if (window.XKScrollFollow && window.XKScrollFollow.get()) {
@@ -575,6 +641,7 @@
             break;
 
         case 'error':
+            finalizeNote();
             if (currentTurnEl) currentTurnEl.classList.add('done');
             if (window.XKScrollFollow && window.XKScrollFollow.get()) {
                 window.XKScrollFollow.get().endRun();

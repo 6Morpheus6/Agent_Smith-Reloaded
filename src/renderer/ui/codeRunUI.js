@@ -24,7 +24,8 @@
     const liveState = { active: false, faceIdx: 0, verb: '', tokensTotal: null, genState: 'idle' };
 
     function routeEvent(type) {
-        if (type === 'tool_start' || type === 'tool_result' || type === 'delta') return 'timeline';
+        if (type === 'tool_start' || type === 'tool_result'
+            || type === 'delta' || type === 'assistant_delta' || type === 'reasoning_delta') return 'timeline';
         return 'code-panel';
     }
 

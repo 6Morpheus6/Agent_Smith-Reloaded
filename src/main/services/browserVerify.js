@@ -38,6 +38,8 @@ function createBrowserVerify(deps) {
         }
 
         const fileUrl = pathToFileURL(resolved.absPath).href;
+        // A window injected by a caller/test is authoritative — never swap engines there.
+        const allowFallback = !!(deps?.headless || !deps?.BrowserWindow);
         const steps = [];
         const consoleErrors = [];
         let win;
@@ -52,6 +54,70 @@ function createBrowserVerify(deps) {
                 webPreferences: hiddenWindowWebPreferences()
             });
             stripCspOnSession(win);
+
+            // The Pinokio host runs this app on a MOCKED Electron (pinokio-server.js): a
+            // BrowserWindow object exists there, but without a real engine (no once /
+            // executeJavaScript, loadURL is a stub). Fall back to real headless Chromium so the
+            // checks still run in that build, instead of reporting a phantom failure the model
+            // would chase with node -e / check.js workarounds.
+            if (typeof win.webContents?.once !== 'function'
+                || typeof win.webContents?.executeJavaScript !== 'function'
+                || typeof win?.loadURL !== 'function') {
+                if (!allowFallback) {
+                    return {
+                        pass: true,
+                        skipped: true,
+                        steps,
+                        consoleErrors: [],
+                        note: 'Headless browser is unavailable in this build — page verification skipped.'
+                    };
+                }
+                const headless = deps.headless || require('./puppeteerBrowser.js');
+                const result = await headless.inspectPage({
+                    url: fileUrl,
+                    checks: Array.isArray(opts?.checks) ? opts.checks : [],
+                    timeoutMs: LOAD_TIMEOUT_MS
+                });
+                if (!result.available) {
+                    steps.push({ step: 'skip', reason: result.reason });
+                    return {
+                        pass: true,
+                        skipped: true,
+                        steps,
+                        consoleErrors: [],
+                        note: `Headless browser unavailable (${result.reason}). ${headless.CHROME_INSTALL_HINT || ''}`.trim()
+                    };
+                }
+                steps.push({ step: 'engine', engine: result.engine || 'puppeteer' });
+                for (const check of (result.checks || [])) {
+                    steps.push({
+                        step: 'check',
+                        expression: check.expression,
+                        pass: check.pass,
+                        ...(check.error ? { error: check.error } : {})
+                    });
+                }
+                const failedCheck = (result.checks || []).find(c => !c.pass);
+                if (failedCheck) {
+                    return {
+                        pass: false,
+                        steps,
+                        consoleErrors: [],
+                        error: `Check failed: ${failedCheck.expression}${failedCheck.error ? ` (${failedCheck.error})` : ''}`
+                    };
+                }
+                if ((result.errors || []).length) {
+                    const seenErrors = result.errors.map(message => ({ level: 3, message }));
+                    return {
+                        pass: false,
+                        steps,
+                        consoleErrors: seenErrors,
+                        error: `Console errors: ${result.errors.slice(0, 3).join('; ')}`
+                    };
+                }
+                steps.push({ step: 'complete', pass: true });
+                return { pass: true, steps, consoleErrors: [], engine: result.engine || 'puppeteer' };
+            }
 
             win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
                 if (level >= 2) {
@@ -121,7 +187,15 @@ function createBrowserVerify(deps) {
         } catch (e) {
             return { pass: false, steps, consoleErrors, error: e.message || String(e) };
         } finally {
-            if (win && !win.isDestroyed()) win.destroy();
+            // Never let cleanup mask a check result: the mocked host BrowserWindow has no
+            // destroy(), and an unguarded call there threw "win.destroy is not a function"
+            // out of a run that had actually loaded fine.
+            try {
+                if (win && !win.isDestroyed()) {
+                    if (typeof win.destroy === 'function') win.destroy();
+                    else if (typeof win.close === 'function') win.close();
+                }
+            } catch (e) { /* ignore */ }
         }
     }
 

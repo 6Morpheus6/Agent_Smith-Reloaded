@@ -43,6 +43,7 @@ const {
     collectPlanBlockers
 } = require('../plan/planStepAutoAdvance.js');
 const { MARK_CODE_STEP_DONE } = require('../tools/planTools.js');
+const { isArtifactPath } = require('../context/planArtifacts.js');
 const { seedPendingMissingRefs, pickNextMissing } = require('./missingRefGuard.js');
 const { tryHarnessScaffold } = require('./harnessScaffold.js');
 
@@ -70,9 +71,9 @@ Rules (follow strictly):
 8. When index.html exists but script.js or style.css is missing, create those files next — never rewrite index.html again.
 9. For games: use a fixed maze/layout array, not random walls that block the player spawn. Constants (GRID_SIZE/ROWS/COLS) MUST match the map's real dimensions.
 10. When done, give a brief summary — but the run is only accepted after every file passes syntax, all references resolve, selectors match, constants match the map, and the page loads without errors. The harness verifies this; you cannot mark success by asserting it.
-11. Long-lived progress belongs in .agentsmith/PLAN.md and IMPLEMENT.md — update milestones when verify gates pass.
+11. Long-lived progress belongs in .agentsmith/PLAN.md and IMPLEMENT.md — the harness maintains both FOR YOU: it logs every tool outcome automatically and ticks milestones when verify gates pass. Do NOT write, patch or append to .agentsmith/PLAN.md or .agentsmith/IMPLEMENT.md yourself. Editing that log changes no code and is not progress; rewriting the log instead of the code is how a run gets stuck.
 12. For a static/offline web app, write CLASSIC scripts, NOT ES modules: every linked .js must contain ZERO "import" and ZERO "export" statements. Share state across files via window globals (e.g. window.Storage = { save, load };) and link each file with a plain <script src> in dependency order (utilities first, entry/app last). Reason: <script type="module"> is blocked over file:// (CORS) so the opened page breaks, and an "import"/"export" in a plain <script src> throws "Cannot use import statement outside a module" / "Unexpected token 'export'". Only use ES modules if the app will be served over http.
-13. HOST TOOLS: project tools (read_file/patch/write_file/grep/glob/run_command) are RELATIVE to the project root and stay inside it. To reach ANYWHERE ELSE on this machine use the host tools with absolute paths (~ ok): read_host_file, write_host_file, delete_host_file, list_host_directory. Host mutations are audited (review_actions / undo_action). For long-running commands use run_command is_background:true, then track them with list_processes / read_process_log / send_input / stop_process — a foreground command that blocks has a 5-minute timeout and should be backgrounded instead.
+13. HOST TOOLS: project tools (read_file/patch/write_file/grep/glob/run_command) are RELATIVE to the project root and stay inside it. To reach ANYWHERE ELSE on this machine use the host tools with absolute paths (~ ok): read_host_file, write_host_file, delete_host_file, list_host_directory. Host mutations are audited (review_actions / undo_action). For long-running commands use run_command is_background:true, then track them with list_processes / read_process_log / send_input / stop_process — a foreground command that blocks is killed after 15 minutes and should be backgrounded instead.
 14. TEST BEFORE DONE — before declaring the task complete (no more tool calls), you MUST have run at least one verification command that passed (exit code 0) SINCE your last file edit:
     - Node.js projects: \`node --check\` on each new/changed .js file, then whatever test script package.json defines (npm test / npx jest). If no test script exists, run the main entry file with node to confirm it loads without errors.
     - Python projects: \`python3 -m py_compile\` on each changed .py, then any test suite (pytest / unittest) if one exists in the project.
@@ -80,7 +81,7 @@ Rules (follow strictly):
     - Static HTML/CSS/JS apps: syntax-check every script you wrote or changed with node --check (the harness also smoke-tests the page).
     A successful verification run since your last edit is what unblocks completion — running tests BEFORE editing again does not count. If a check fails, fix it and verify again.
 15. RUN_CODE DISCIPLINE — use run_code for work that loops over tools; do NOT use it to write files (write_file/patch are better: they diff, snapshot for Revert All, and syntax-check). Inside a program: independent reads may be parallelized with Promise.all; writes and commands serialize automatically in submission order. A tool denial THROWS — handle it with try/catch or keep the program small enough that one failure is informative. Keep programs under ~50 sub-calls; for bigger sweeps, split across multiple run_code calls.
-16. PACKAGING & LONG BUILDS (AppImage / .deb / installer tasks) — a packaging command (electron-builder, npm run dist, pyinstaller, make) can legitimately take 10-60 minutes. NEVER treat a timeout as "the build failed": re-run it with is_background:true and poll read_process_log until the job exits, OR pass timeout_ms sized generously. Before retrying any interrupted build, list the output directory (release/, dist/) first — the artifacts may already exist. Add packaging steps to your milestones, record each build attempt's outcome in .agentsmith/IMPLEMENT.md, and finish by VERIFYING the produced files exist and are non-trivial size (ls -lh) before declaring done. Electron runtimes come from the harness-managed depot cache: commands you run via run_command already carry env pointing \`npm install\` / electron-builder at a local cache of Electron zips + builder toolsets, which the app auto-downloads on first launch (see the BUILD ASSETS sidebar section). Do NOT set up mirrors or pre-download Electron manually. A one-time "downloading electron" in build output is NORMAL when the depot cache doesn't have that version yet — it's a ~120 MB fetch, not a failure; only report the exact failing line if the download itself errors.
+16. PACKAGING & LONG BUILDS (AppImage / .deb / installer tasks) — a packaging command (electron-builder, npm run dist, pyinstaller, make) can legitimately take 10-60 minutes. NEVER treat a timeout as "the build failed": re-run it with is_background:true and poll read_process_log until the job exits, OR pass timeout_ms sized generously. Before retrying any interrupted build, list the output directory (release/, dist/) first — the artifacts may already exist. Add packaging steps to your milestones (the harness records each build attempt's outcome in .agentsmith/IMPLEMENT.md itself — never edit that file), and finish by VERIFYING the produced files exist and are non-trivial size (ls -lh) before declaring done. Electron runtimes come from the harness-managed depot cache: commands you run via run_command already carry env pointing \`npm install\` / electron-builder at a local cache of Electron zips + builder toolsets, which the app auto-downloads on first launch (see the BUILD ASSETS sidebar section). Do NOT set up mirrors or pre-download Electron manually. A one-time "downloading electron" in build output is NORMAL when the depot cache doesn't have that version yet — it's a ~120 MB fetch, not a failure; only report the exact failing line if the download itself errors.
 17. NEVER RETRY A FAILED EDIT BLIND — when a patch or write_file FAILS on a path, your picture of that file is wrong. The harness blocks further writes to that path until you read_file it again: read the CURRENT content first, then craft the edit against what you actually saw. Re-sending the same stale text cannot succeed.
 18. READ BACK BEFORE DONE — after your last edit, read (read_file/grep) at least once over the files you changed and confirm the pieces connect: every import exists, ids/selectors match between HTML/CSS/JS, callers use the shape you just wrote. The harness vetoes a done-claim made with zero reads since the last edit.
 19. BACKGROUND JOBS MUST SETTLE — if you started a command with is_background:true (a build, an install), poll read_process_log until it reports an exit code BEFORE declaring done: a failed background build is not "done", and its output names the fix. Exception: a server you intentionally keep running — say so in your summary.
@@ -90,7 +91,10 @@ function trackFileTouch(session, name, args, toolResult) {
     if (!toolResult || toolResult.error || toolResult.skipped) return;
     if (name === 'write_file' || name === 'append_file' || name === 'patch') {
         const rel = toolResult.relPath || args.path;
-        if (rel && !session.filesTouched.includes(rel)) {
+        // Harness bookkeeping (.agentsmith/PLAN.md, IMPLEMENT.md, ledgers) is NOT a
+        // deliverable. Counting it made editing the plan log look like build progress,
+        // reset the no-progress guard forever, and pulled the log into gate/DOM scans.
+        if (rel && !isArtifactPath(rel) && !session.filesTouched.includes(rel)) {
             session.filesTouched.push(rel);
         }
     }
@@ -658,6 +662,8 @@ async function runTurnLoop(ctx) {
             result = await stream({
                 apiBaseUrl,
                 apiKey: apiKey || null,
+                // Names the backend in error messages (Ollama vs LM Studio).
+                provider: ctx.provider || null,
                 model: session.model,
                 messages: bodyMessages,
                 tools,
@@ -665,7 +671,11 @@ async function runTurnLoop(ctx) {
                 // v52.7: max_tokens is unbounded (-1) inside streamCompletion — this value
                 // no longer caps the reply; outReserve only reserves CONTEXT room for it.
                 temperature: session.codeTemperature,
-                onDelta: (d) => emit({ type: 'delta', text: d }),
+                // Content and reasoning are emitted as separate channels: the timeline keeps
+                // the model's spoken text as a persistent message and only clears the
+                // per-turn reasoning panel (see activityTimeline.handleCodeEvent).
+                onDelta: (d) => emit({ type: 'assistant_delta', text: d }),
+                onReasoning: (d) => emit({ type: 'reasoning_delta', text: d }),
                 // v52.7: live generation state ('waiting' → 'generating') — model-agnostic,
                 // driven by what arrives on the wire. The UI shows "model is generating" and
                 // refuses actions that would cut this reply off mid-stream.
@@ -750,10 +760,17 @@ async function runTurnLoop(ctx) {
         // Reasoning=off (or a coder model) makes the same build finish in minutes.
         if (result.sawReasoning && !session.modelAdvised) {
             session.modelAdvised = true;
+            // The biggest speed lever differs per backend: LM Studio has a per-model
+            // "Reasoning" toggle, Ollama has none (thinking is sent per request) — so point
+            // at THIS app's 🧠 THINK toggle there instead of sending users to a UI that
+            // cannot fix it.
+            const reasoningLever = ctx.provider === 'ollama'
+                ? 'turn 🧠 THINK off in Agent Smith (it is sent with every request)'
+                : 'set the model\'s "Reasoning" toggle to Off in LM Studio';
             emit({
                 type: 'model_advisory',
                 level: 'info',
-                message: 'This looks like a reasoning model — it thinks for many tokens before each tool call, so Code Mode turns are slow. To speed up builds: set the model\'s "Reasoning" toggle to Off in LM Studio (biggest lever), or use a coder model (e.g. Qwen2.5-Coder).'
+                message: `This looks like a reasoning model — it thinks for many tokens before each tool call, so Code Mode turns are slow. To speed up builds: ${reasoningLever} (biggest lever), or use a coder model (e.g. Qwen2.5-Coder).`
             });
         }
         const extractSchemas = goalImpliesBuildWork(session.goal)
@@ -930,7 +947,27 @@ async function runTurnLoop(ctx) {
 
             let preResult = null;
             if (dup) {
-                preResult = { skipped: true, reason: 'Duplicate call this turn' };
+                // Two different blocks, and the model must be told which one it hit: an
+                // identical call earlier in THIS turn is pointless, while an identical call
+                // that FAILED earlier in the run needs a changed request — and a read of that
+                // path is what unlocks it (tools/dedup.js). The old single text claimed
+                // "this turn" for both, so a model blocked across turns kept reasoning about
+                // a same-turn dedupe that never happened instead of fixing the call.
+                const priorFailure = dedup.failureReason(name, args);
+                if (priorFailure) {
+                    const where = args && args.path ? ` on "${args.path}"` : '';
+                    preResult = {
+                        skipped: true,
+                        blocked: 'previously failed',
+                        reason: `BLOCKED — this exact ${name} request already failed earlier in this run${where}: ${String(priorFailure).slice(0, 200)}. ` +
+                            'Sending it unchanged cannot succeed. ' +
+                            (args && args.path
+                                ? `read_file "${args.path}" first (that unlocks the retry), then send a corrected call.`
+                                : 'Change the arguments, then retry.')
+                    };
+                } else {
+                    preResult = { skipped: true, reason: `Duplicate call — this identical ${name} request already ran in this turn. Change the arguments or move on.` };
+                }
             } else {
                 const veto = await runMiddlewareChain(middleware, 'beforeTool', {
                     ctx, session, payload: { name, args, dup }
@@ -976,17 +1013,23 @@ async function runTurnLoop(ctx) {
                         // evidence the current files at least execute — the completion gate credits
                         // this so scriptless JS projects aren't perpetually "unverified". A new write
                         // invalidates the signal (the run no longer reflects the latest code).
-                        if (ok && name === 'run_command' && !args.is_background) session.agentRanOkAfterEdit = true;
+                        // (agentRanOkAfterEdit for run_command is set further below, after the
+                        // vacuous-verification check — an `EXIT=True` run is not evidence.)
                         if (WRITE_TOOLS.has(name) && ok) session.agentRanOkAfterEdit = false;
                         // v51.5 TEST BEFORE DONE tracking: a verification command that PASSED since the last
                         // edit is what unblocks completion; every successful write resets it so each new
                         // state of the code must be re-verified before "done".
                         // v54.5: shared policy list — build/package commands (electron-builder,
                         // npm run dist, pyinstaller) count as verification when they exit 0.
-                        const { isVerificationCommand, isLongBuildCommand } = require('../../shared/longBuildPolicy.js');
+                        const { isVerificationCommand, isLongBuildCommand, vacuousVerificationReason } = require('../../shared/longBuildPolicy.js');
                         if (name === 'run_command' && !args.is_background) {
                             const cmd = String(args.command || '');
-                            if (isVerificationCommand(cmd) && ok) session.testRunsSinceEdit = true;
+                            // `node --check x.js; echo "EXIT=$?"` exits 0 printing "EXIT=True" on
+                            // Windows: it reads as a passing check and is not one, so it must not
+                            // satisfy TEST-BEFORE-DONE or count as a successful run after an edit.
+                            const vacuous = vacuousVerificationReason(cmd);
+                            if (ok && !vacuous) session.agentRanOkAfterEdit = true;
+                            if (isVerificationCommand(cmd) && ok && !vacuous) session.testRunsSinceEdit = true;
                             // A long build finishing (pass OR fail) is forward motion — a failed
                             // build means the model must read its output and fix, not stall.
                             if (isLongBuildCommand(cmd)) {
@@ -1012,8 +1055,18 @@ async function runTurnLoop(ctx) {
                             }
                         }
                         if (ok && WRITE_TOOLS.has(name)) dedup.clearFailures();
-                        if (ok && WRITE_TOOLS.has(name)) session._turnHadEdit = true;
-                        dedup.recordResult(name, args, ok);
+                        // Re-inspecting a path is exactly what the harness tells the model to do
+                        // after a failed edit, so reading that path must also unlock the retry —
+                        // otherwise the failure memory is a permanent dead end.
+                        if (ok && (name === 'read_file' || name === 'read_host_file') && args.path) {
+                            dedup.clearFailuresForPath(args.path);
+                        }
+                        // An edit to harness bookkeeping (.agentsmith/*) is not an edit of the
+                        // deliverable — it must not reset the no-progress guard.
+                        if (ok && WRITE_TOOLS.has(name) && !isArtifactPath(args.path)) session._turnHadEdit = true;
+                        // A duplicate-skip is NOT a new outcome: recording it would overwrite the
+                        // stored failure reason with the "BLOCKED" text itself.
+                        if (!dup) dedup.recordResult(name, args, ok, toolResult);
                         qualityMonitor.record(name, ok, toolResult.error || toolResult.reason || toolResult.message);
                         const stopCheck = earlyStop.onToolResult(ok, dup);
                         session.toolCount++;
@@ -1089,6 +1142,19 @@ async function runTurnLoop(ctx) {
                             }
                         }
 
+                        if (!ok && name === 'write_file' && /requires "content"/i.test(String(toolResult.error || ''))) {
+                            const target = (args && args.path)
+                                || (session.pendingMissingRefs || [])[0]
+                                || 'index.html';
+                            session.messages.push({
+                                role: 'system',
+                                content: '[HARNESS — MALFORMED write_file] Your last write_file carried no "content" STRING, so NOTHING was written. '
+                                    + `Send it again with both fields: {"path":"${target}","content":"<the complete file text>"}. `
+                                    + 'The file text goes in "content" — not in "data", "code", "text" or "body".'
+                            });
+                            session.phase = 'implement';
+                        }
+
                         if (ok && name === 'mark_code_step_done' && toolResult?.advanced) {
                             session._planActiveIdx = session.codePlan.currentStepIndex ?? 0;
                             session._planActiveSinceTurn = session.turn;
@@ -1105,6 +1171,21 @@ async function runTurnLoop(ctx) {
 
                         if (ok) {
                             trackFileTouch(session, name, args, toolResult);
+                            if (isArtifactPath(args.path)) {
+                                // Say it out loud once or twice: the harness owns these files, and a
+                                // weak model otherwise reads its own log edit as "stuff is happening".
+                                const n = (session._artifactWriteNudges || 0) + 1;
+                                session._artifactWriteNudges = n;
+                                if (n <= 2) {
+                                    session.messages.push({
+                                        role: 'system',
+                                        content: '[HARNESS — HARNESS-OWNED FILE] ' + String(args.path) +
+                                            ' is maintained automatically; every tool outcome and milestone is already recorded there. ' +
+                                            'Editing it changes no code and moves the task no closer to done. ' +
+                                            'Next action: patch/write_file PROJECT code, or run a verification command.'
+                                    });
+                                }
+                            }
                             // v52.4 multi-file steering: an HTML write that inlines substantive CSS/JS
                             // (and links no local assets) is the single-file failure mode — nudge ONCE to
                             // split into index.html + style.css + script.js. Never blocks; auto-advance

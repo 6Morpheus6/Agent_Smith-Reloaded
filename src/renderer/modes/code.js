@@ -241,6 +241,7 @@
                         numCtx,
                         apiBaseUrl,
                         apiKey: depsRef.getApiKey?.() || null,
+                        provider: depsRef.getProvider?.() || null,
                         projectRoot: root,
                         // v54.4: resumed runs honour the CURRENT 🧠 THINK state (a session
                         // saved before this field existed resumes with thinking ON).
@@ -326,6 +327,7 @@
                             numCtx: getNumCtx?.(),
                             apiBaseUrl: getApiBase?.(),
                             apiKey: getApiKey?.() || null,
+                            provider: depsRef.getProvider?.() || null,
                             // v54.4: 🧠 THINK — the approved run continues with the CURRENT state.
                             thinkingEnabled: depsRef.getThinkingEnabled?.() !== false,
                             strictNoThink: depsRef.getStrictNoThink?.() === true,
@@ -464,6 +466,8 @@
         case 'output_truncated':
             break;
         case 'delta':
+        case 'assistant_delta':
+        case 'reasoning_delta':
         case 'tool_start':
         case 'tool_result':
         case 'final_summary':
@@ -568,6 +572,7 @@
                         projectRoot,
                         apiBaseUrl,
                         apiKey,
+                        provider: deps.getProvider?.() || null,
                         requirePlanApproval: deps.getRequirePlanApproval?.() === true,
                         grindMode: deps.getGrindMode?.() !== false,
                         isolatedRun: deps.getIsolatedRun?.() === true,

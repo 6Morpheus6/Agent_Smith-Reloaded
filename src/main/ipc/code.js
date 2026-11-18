@@ -46,6 +46,12 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
     // so they never resurface as "Resume" candidates (see CodeSession.sweepStale).
     try { CodeSession.sweepStale(userDataPath); } catch (e) { /* non-fatal */ }
 
+    // A shell "verification" can look green while proving nothing (see
+    // shared/longBuildPolicy.vacuousVerificationReason). The command really ran, so this warns
+    // instead of failing it — but the warning also stops it from counting as a passed test.
+    const { vacuousVerificationReason } = require('../../shared/longBuildPolicy.js');
+    const vacuousVerification = (command) => vacuousVerificationReason(command, process.platform);
+
     function spawnShell(command, cwd) {
         const cfg = projectContext.getShellConfig();
         // v54.8 — depot-aware env (electron_config_cache / XDG_CACHE_HOME → <userData>/electron-cache).
@@ -124,9 +130,9 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
                 // install/build in this command hits <userData>/electron-cache, not GitHub.
                 try { await depotReady(); } catch (_) {}
                 // v54.5: per-call timeout from longBuildPolicy (long builds get a build-sized
-                // window; everything else keeps the 5-minute default). onHeartbeat lets an
+                // window; everything else keeps the 15-minute default). onHeartbeat lets an
                 // output-silent builder keep the run watchdog alive via periodic ticks.
-                const FG_TIMEOUT_MS = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 300000;
+                const FG_TIMEOUT_MS = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 900000;
                 const cfg = projectContext.getShellConfig();
                 // Bind to the active run's abort signal so stopping the run also kills an
                 // in-flight command instead of waiting out its timeout.
@@ -174,12 +180,35 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
                         else if (signal && signal.aborted) parts.push('run stopped');
                         else parts.push(`exit code ${code}`);
                         out.error = `Command failed (${parts.join(', ')}): ${command}`;
+                        // v56.5.2 — PowerShell rejects unsupported syntax at PARSE time, so the
+                        // command never ran and stdout is empty: "exit code 1" alone reads like a
+                        // code error. Model logs showed it re-probing the same command for turns.
+                        // "ParserError" is the language-independent marker (Windows PowerShell 5.1
+                        // says "The token '&&' is not a valid statement separator" locally).
+                        if (!timedOut && /ParserError/i.test(stderr)) {
+                            // The advice depends on WHY parsing failed: a bash-style chain is a
+                            // PowerShell 5.1 limitation (pwsh 7 parses it fine), while any other
+                            // parse error means the quoting itself is broken. Sending the `&&`
+                            // advice for every parse error would be wrong once pwsh 7 is in use.
+                            out.remediation = /&&|\|\|/.test(command)
+                                ? 'The shell (PowerShell) could not PARSE this command, so nothing ran — it is not a problem in your code. '
+                                    + '`&&`/`||` are rejected by Windows PowerShell 5.1; use `;` or one command per run_command call, '
+                                    + 'and `$LASTEXITCODE` (not `$?`) to read an exit code.'
+                                : 'The shell (PowerShell) could not PARSE this command, so nothing ran — it is not a problem in your code. '
+                                    + 'Run it as one simple command per run_command call, and check quoting of nested '
+                                    + '`node -e "..."` one-liners (prefer writing a temp script file instead).';
+                        }
                         // v54.5: a timed-out long build gets explicit recovery guidance — the
                         // old behaviour (bare timeout error) made models retry blindly and loop.
                         if (timedOut) {
                             const { isLongBuildCommand, longBuildGuidance } = require('../../shared/longBuildPolicy.js');
                             if (isLongBuildCommand(command)) out.remediation = longBuildGuidance(command);
                         }
+                    } else {
+                        // exit 0 + "EXIT=True" is the silent version of the same mistake: the
+                        // run looks green, so nothing else would ever flag it.
+                        const vacuous = vacuousVerification(command);
+                        if (vacuous) out.verification_warning = vacuous;
                     }
                     resolve(out);
                 });
@@ -316,6 +345,8 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             // Hosted-provider key (Kimi K3 etc.). Passed per-run from the renderer;
             // never persisted into the CodeSession on disk.
             apiKey: opts.apiKey || null,
+            // Active backend ('ollama' | 'lmstudio') — only names the backend in errors.
+            provider: opts.provider || null,
             userDataPath,
             projectContext,
             buildExecDeps,
@@ -381,6 +412,7 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             numCtx,
             apiBaseUrl,
             apiKey: opts?.apiKey || null,
+            provider: opts?.provider || null,
             maxTurns: opts?.maxTurns,
             codeTemperature: opts?.codeTemperature,
             forcePlan: opts?.forcePlan,
@@ -433,6 +465,7 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             numCtx,
             apiBaseUrl,
             apiKey: opts?.apiKey || null,
+            provider: opts?.provider || null,
             requirePlanApproval: false,
             continueAfterApproval: session.status === 'awaiting_approval' && !!opts?.continueAfterApproval,
             // v54.4: 🧠 THINK — resume honours the CURRENT toggle state (undefined → ON).
@@ -474,6 +507,7 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
             numCtx: opts?.numCtx || session.numCtx,
             apiBaseUrl: opts?.apiBaseUrl || getLmsUrl?.() || 'http://127.0.0.1:1234',
             apiKey: opts?.apiKey || null,
+            provider: opts?.provider || null,
             requirePlanApproval: false,
             continueAfterApproval: true,
             grindMode: opts?.grindMode !== false,
@@ -506,7 +540,9 @@ module.exports = function registerCodeIpc(ipcMain, deps) {
     });
 
     ipcMain.handle('code-list-sessions', async (_event, opts) => {
-        const projectRoot = opts?.projectRoot || projectContext.getRoot();
+        // getRootOrNull, not getRoot: with no workspace picked the answer is "none", never the
+        // process cwd (which is Agent Smith's own folder when Pinokio launches it).
+        const projectRoot = opts?.projectRoot || projectContext.getRootOrNull();
         let list = await CodeSession.listIncomplete(userDataPath, projectRoot);
         // v53.1: a session this process is actively running is LIVE, not resumable — the
         // renderer's "Resume Code run?" banner must never offer it (tapping would just hit

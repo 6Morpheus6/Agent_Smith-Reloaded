@@ -25,6 +25,9 @@
  * Adding a family: insert a row above `default`, add a routing test. Nothing else
  * to touch — turnLoop / planningPhase / chat all call through this module.
  *
+ * `default` is not a pass-through: it normalizes system-message placement, because
+ * that is a wire-shape requirement of strict templates rather than a family trait.
+ *
  * Exposed as window.XKModelHarness (renderer) / module.exports (main + tests).
  */
 (function (global) {
@@ -33,19 +36,24 @@
     const gemmaHarness = require('./gemmaHarness.js');
     const { isKimiK3Model, isQwenThinkingModel } = require('../../shared/modelClassifier.js');
 
-    // Qwen3 chat template (as shipped by LM Studio) is STRICT about message shape: at most
-    // ONE system message, and it must be the FIRST one. Agent Smith's Code Mode prompt has
-    // several leading system blocks (persona + phase hint + plan anchor + code-plan context)
-    // AND injects mid-conversation harness nudges as role:"system" — both shapes make LM
-    // Studio answer HTTP 200 with an EMPTY stream ("Jinja Exception: System message must be
-    // at the beginning"), which Code Mode reads as dead empty turns. Reshape (idempotent):
+    // Strict Jinja chat templates (Qwen3.x and every finetune built on it — qwen3.8, Bonsai,
+    // …) reject any system message that is not the FIRST message: at most ONE system message,
+    // at the very start. Agent Smith's Code Mode prompt has several leading system blocks
+    // (persona + phase hint + plan anchor + code-plan context) AND injects mid-conversation
+    // harness nudges as role:"system", which those templates answer with HTTP 500 "Jinja
+    // Exception: System message must be at the beginning" (or an empty 200 stream).
+    //
+    // So this normalization is applied for EVERY model, not just ids that happen to contain
+    // "qwen": a finetune keeps the base model's template but not its name, and a user may
+    // legitimately code with any model. For templates that don't care it is a no-op.
+    // Reshape (idempotent):
     //   1. merge all leading consecutive system blocks into a single first message,
     //   2. convert any later role:"system" note to user role — every harness nudge is
     //      self-describing bracketed text ("[COMPLETION BLOCKED]", "[HARNESS — …]"), so it
     //      reads identically as a user turn and keeps strict role alternation valid,
     //   3. drop assistant messages carrying neither content nor tool_calls (empty turns the
     //      old loop persisted; nothing for the model to see, some templates choke on them).
-    function reshapeForQwen(messages) {
+    function normalizeMessageRoles(messages) {
         if (!Array.isArray(messages)) return messages;
         const out = [];
         let i = 0;
@@ -71,7 +79,10 @@
             if (m.role === 'system') {
                 const prev = out[out.length - 1];
                 if (prev && prev.role === 'user' && typeof prev.content === 'string') {
-                    prev.content += '\n\n' + String(m.content || '');
+                    // REPLACE, never mutate: `out` holds the CALLER's message objects, and
+                    // Code Mode persists session.messages — an in-place merge would write
+                    // harness-only text into the saved history.
+                    out[out.length - 1] = { ...prev, content: `${prev.content}\n\n${String(m.content || '')}` };
                 } else {
                     out.push({ ...m, role: 'user' });
                 }
@@ -91,7 +102,8 @@
             const prev = settled[settled.length - 1];
             if (prev && prev.role === 'user' && m.role === 'user'
                 && typeof prev.content === 'string' && typeof m.content === 'string') {
-                prev.content += '\n\n' + m.content;
+                // Copy, don't mutate (see above): the caller's objects stay exactly as saved.
+                settled[settled.length - 1] = { ...prev, content: `${prev.content}\n\n${m.content}` };
             } else {
                 settled.push(m);
             }
@@ -140,7 +152,7 @@
                 'template) so reasoning stays brief and native tool calls come through — verified ' +
                 'live on qwen3.8-27b-uncensored.',
             nativeTools: true,
-            adaptMessages: (messages) => reshapeForQwen(messages),
+            adaptMessages: (messages) => normalizeMessageRoles(messages),
             pinTemperature: (t) => t,
             extraBody: () => ({ chat_template_kwargs: { enable_thinking: false } })
         },
@@ -148,10 +160,12 @@
             id: 'default',
             match: () => true,
             description:
-                'Standard OpenAI-compatible path (Qwen, Llama, DeepSeek, Mistral, …): ' +
-                'no prompt reshaping, native tool calling, caller temperature respected.',
+                'Standard OpenAI-compatible path (Llama, DeepSeek, Mistral, Qwen3.8 ' +
+                'finetunes such as Bonsai, …): native tool calling, caller temperature ' +
+                'respected. System messages are normalized so strict Jinja templates never ' +
+                'reject the prompt (one leading system block, late system notes as user).',
             nativeTools: true,
-            adaptMessages: (messages) => messages,
+            adaptMessages: (messages) => normalizeMessageRoles(messages),
             pinTemperature: (t) => t
         }
     ];

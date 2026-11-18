@@ -596,6 +596,7 @@ button:disabled {
 /* Timeline rows must not shrink — flex defaults clip tool/reasoning cards. */
 #messages > .activity-turn,
 #messages > .activity-thinking,
+#messages > .activity-note,
 #messages > .agent-log,
 #messages > .search-results-log,
 #messages > .run-status, /* legacy — popup moved to .verify-popup-host */

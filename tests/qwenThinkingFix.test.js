@@ -126,16 +126,26 @@ test('reshape: is idempotent and preserves tool-call pairing', () => {
     assert.ok(once.some(m => m.role === 'tool' && m.tool_call_id === 'c1'), 'tool result kept in pair order');
 });
 
-test('reshape: non-qwen families pass messages through untouched', () => {
+test('reshape: non-qwen families get the same system-shape normalization', () => {
     const msgs = [
         { role: 'system', content: 's1' },
         { role: 'system', content: 's2' },
-        { role: 'user', content: 'task' }
+        { role: 'user', content: 'task' },
+        { role: 'system', content: '[NUDGE]' }
     ];
-    // deepseek-r1 rides the default strategy (no prompt reshaping at all) — gemma folds by design.
+    // The strict-template fix is NOT gated on the model name: a Qwen3.8 finetune under a
+    // different name (Bonsai) keeps the template, and any model may be used for coding.
     const out = getModelHarness('deepseek-r1-32b').adaptMessages(msgs);
-    assert.equal(out.filter(m => m.role === 'system').length, 2, 'default family untouched (no merge)');
-    assert.deepEqual(out, msgs, 'byte-identical passthrough for non-qwen families');
+    assert.equal(out.filter(m => m.role === 'system').length, 1, 'default family merged to one system block');
+    assert.match(out[0].content, /s1[\s\S]*s2/);
+    assert.ok(out.some(m => m.role === 'user' && /\[NUDGE\]/.test(m.content)), 'late system nudge kept as user');
+    // And it never rewrites the caller's history (Code Mode persists these objects).
+    assert.deepEqual(msgs, [
+        { role: 'system', content: 's1' },
+        { role: 'system', content: 's2' },
+        { role: 'user', content: 'task' },
+        { role: 'system', content: '[NUDGE]' }
+    ], 'input messages must not be mutated');
 });
 
 // --- wire: real streamCompletion against a capture server ---------------------

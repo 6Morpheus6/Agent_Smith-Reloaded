@@ -101,13 +101,19 @@ const CODE_TOOLS = [
         type: 'function',
         function: {
             name: 'run_command',
-            description: 'Run a shell command in the project root. Long builds (electron-builder, npm run dist, pyinstaller) may take far longer than the default 5-minute timeout: pass timeout_ms (milliseconds), or better, set is_background:true and poll with read_process_log.',
+            // The model MUST know which shell it is talking to: it used to be told nothing, so
+            // bash idioms (`cmd1 && cmd2`, `echo $?`) were sent to Windows PowerShell 5.1,
+            // which cannot parse `&&` at all and never ran the command.
+            description: 'Run a shell command in the project root.' + (process.platform === 'win32'
+                ? ' Shell is PowerShell: do NOT chain with `&&` or `||` (Windows PowerShell 5.1 rejects them as a parse error and NOTHING runs) — use `;` or one command per call. `$?` is not an exit code — use `$LASTEXITCODE`.'
+                : ' Shell is /bin/sh: chain with `&&`, `$?` holds the exit code.')
+                + ' Long builds (electron-builder, npm run dist, pyinstaller) may take far longer than the default 15-minute timeout: pass timeout_ms (milliseconds), or better, set is_background:true and poll with read_process_log.',
             parameters: {
                 type: 'object',
                 properties: {
                     command: { type: 'string' },
                     is_background: { type: 'boolean', description: 'Run in background' },
-                    timeout_ms: { type: 'number', description: 'Max milliseconds to wait (long builds/packaging; default 300000)' }
+                    timeout_ms: { type: 'number', description: 'Max milliseconds to wait (long builds/packaging; default 900000 = 15 min)' }
                 },
                 required: ['command']
             }

@@ -4,6 +4,8 @@
  */
 'use strict';
 
+const { isArtifactPath } = require('./planArtifacts.js');
+
 class PlanAnchor {
     constructor(goal, planArtifacts = null, ledger = null) {
         this.goal = goal || '';
@@ -22,9 +24,13 @@ class PlanAnchor {
     }
 
     recordDone(summary, meta = {}) {
+        // A tool call that only rewrote harness bookkeeping (.agentsmith/PLAN.md, IMPLEMENT.md)
+        // is not progress. Recording it handed the model its own plan-log edit back as a
+        // "completed step" on the next turn — the write-log loop of v57.
+        const artifactRef = isArtifactPath(meta.ref);
         if (summary) this.completed.push(String(summary).slice(0, 200));
         // v54.5: durable progress ledger — every meaningful tool outcome recorded on disk.
-        if (this.ledger?.record) {
+        if (this.ledger?.record && !artifactRef) {
             this.ledger.record({
                 tool: meta.tool || 'step',
                 ok: meta.ok !== false,
@@ -32,7 +38,7 @@ class PlanAnchor {
                 note: meta.note || ''
             });
         }
-        if (this.planArtifacts?.enabled) {
+        if (this.planArtifacts?.enabled && !artifactRef) {
             this.planArtifacts.appendImplementEntry({
                 title: 'Tool success',
                 what: summary || '(completed step)'

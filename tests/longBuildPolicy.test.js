@@ -7,6 +7,7 @@ const assert = require('node:assert');
 const {
     isLongBuildCommand,
     isVerificationCommand,
+    vacuousVerificationReason,
     clampRequestedTimeout,
     exclusiveBoundFor,
     foregroundTimeoutFor,
@@ -74,6 +75,18 @@ test('exclusive bound: recognized build gets the build window, not the flat defa
     // background commands never take an exclusive bound; other tools pass through
     assert.strictEqual(exclusiveBoundFor('run_command', { command: 'make', is_background: true }, base), base);
     assert.strictEqual(exclusiveBoundFor('write_file', {}, base), base);
+});
+
+test('a shell-state echo is not a verification (vacuous exit probe)', () => {
+    // Regressions from the Super Mario ledgers: exit 0 + "EXIT=True" was filed as a pass.
+    assert.ok(vacuousVerificationReason('node --check script.js; echo "EXIT=$?"', 'win32'));
+    assert.ok(vacuousVerificationReason('node --check x.js; echo EXIT=$LASTEXITCODE', 'win32'));
+    assert.ok(vacuousVerificationReason('echo %ERRORLEVEL%', 'win32'));
+    // real status propagation is a genuine check
+    assert.strictEqual(vacuousVerificationReason('node --check x.js; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', 'win32'), null);
+    // a plain check with no probe is fine, and POSIX shells have no such trap
+    assert.strictEqual(vacuousVerificationReason('node --check script.js', 'win32'), null);
+    assert.strictEqual(vacuousVerificationReason('node --check script.js; echo "EXIT=$?"', 'linux'), null);
 });
 
 test('timed-out build carries actionable remediation guidance', () => {

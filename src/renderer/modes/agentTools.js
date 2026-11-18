@@ -42,7 +42,7 @@
         type: 'function',
         function: {
             name: 'run_shell_command',
-            description: 'Execute a bash shell command. Use ONLY when the user asks you to run something or check live system state (processes, network, disk). Not needed for conversation.',
+            description: 'Execute a shell command (bash/sh on macOS and Linux, PowerShell on Windows — no `&&`/`||` on Windows PowerShell 5.1, use `;`). Use ONLY when the user asks you to run something or check live system state (processes, network, disk). Not needed for conversation.',
             parameters: { type: 'object', properties: { command: { type: 'string' }, is_background: { type: 'boolean' } }, required: ['command'] }
         }
     },

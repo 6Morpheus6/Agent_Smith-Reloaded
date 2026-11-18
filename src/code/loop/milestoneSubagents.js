@@ -35,7 +35,7 @@ async function runOneMilestone(opts, milestone) {
     const {
         session, parentProjectRoot, planAnchor, planArtifacts, earlyStop, qualityMonitor,
         trace, userDataPath, buildExecDeps, execDeps, emit, signal, apiBaseUrl, apiKey,
-        pluginToolSchemas, pluginToolNames, streamCompletion, memory, pluginManager,
+        pluginToolSchemas, pluginToolNames, streamCompletion, memory, pluginManager, provider,
         executeTurnLoop, projectContext, mode,
         // v54.4: 🧠 THINK — child milestone runs inherit the parent run's thinking state.
         thinkingEnabled, strictNoThink
@@ -109,6 +109,7 @@ async function runOneMilestone(opts, milestone) {
             signal,
             apiBaseUrl,
             apiKey: apiKey || null,
+            provider: provider || null,
             pluginToolSchemas,
             pluginToolNames,
             streamCompletion,

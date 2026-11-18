@@ -18,6 +18,7 @@ const {
     clearDomRepairsIfScriptPatched
 } = require('../context/htmlContract.js');
 const { autoAdvancePlanSteps, planProgressPayload } = require('../plan/planStepAutoAdvance.js');
+const { isArtifactPath } = require('../context/planArtifacts.js');
 
 function mergeSensorWarnings(toolResult, sensor) {
     if (!sensor || (!sensor.warnings?.length && !sensor.remediation?.length)) return;
@@ -156,7 +157,7 @@ function createDefaultMiddleware(ctx) {
                 if (!session.codePlan?.steps?.length) return null;
                 const touched = [...(session.filesTouched || [])];
                 const rel = toolResult?.relPath || args?.path;
-                if (rel) {
+                if (rel && !isArtifactPath(rel)) {
                     const norm = String(rel).replace(/\\/g, '/');
                     if (!touched.includes(norm)) touched.push(norm);
                 }
@@ -188,7 +189,9 @@ function createDefaultMiddleware(ctx) {
                 const { name, args, toolResult, ok } = payload;
                 if (!ok || !session.planArtifacts?.enabled) return null;
 
-                if (WRITE_TOOLS.has(name)) {
+                // Never log the model's own edit of the harness log back into the harness log:
+                // that echo made IMPLEMENT.md change on every turn no matter what the model did.
+                if (WRITE_TOOLS.has(name) && !isArtifactPath(args.path)) {
                     await session.planArtifacts.appendImplementEntry({
                         title: `${name} ${args.path || ''}`.trim(),
                         what: `Modified ${args.path || 'file'}`

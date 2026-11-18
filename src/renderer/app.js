@@ -87,7 +87,7 @@ function createWebApiPolyfill() {
                 }
 
                 // --- v48: add timeout to /api/invoke so mobile/web clients don't hang forever.
-                const invokeTimeoutMs = parseInt(localStorage.getItem('agentsmith_request_timeout') || '300000', 10);
+                const invokeTimeoutMs = parseInt(localStorage.getItem('agentsmith_request_timeout') || '900000', 10);
                 const invokeController = new AbortController();
                 const invokeTimerId = setTimeout(() => {
                     invokeController.abort(new Error(`Request timed out after ${invokeTimeoutMs / 1000}s`));
@@ -448,6 +448,13 @@ function effectiveApiBase() {
         return u.replace(/\/+$/, '');
     }
     return currentApiBase;
+}
+// Display name of the ACTIVE backend for user-facing messages. Chat errors used to blame
+// LM Studio even when Ollama answered, which sent users debugging the wrong server.
+function activeBackendLabel() {
+    const shared = window.XKBackendLabel?.backendLabel;
+    if (typeof shared === 'function') return shared(activeProvider, effectiveApiBase());
+    return activeProvider === 'ollama' ? 'Ollama' : 'LM Studio';
 }
 // v56.5: both backends' bases regardless of the ACTIVE provider — UNLOAD ALL frees LM
 // Studio AND Ollama (both servers may run side by side on low-VRAM configs), so the
@@ -914,6 +921,9 @@ if (window.XKCodeMode) {
             return r?.projectRoot || r?.root || null;
         },
         getApiBase: () => effectiveApiBase(),
+        // v56.5.2: active backend, forwarded with every code run so error messages name the
+        // server that actually answered (Ollama vs LM Studio) instead of always "LM Studio".
+        getProvider: () => activeProvider,
         getApiKey: () => (kimiK3Active() ? kimiK3ApiKey() : null),
         // v52.5: flush BOTH pending context syncs AND a queued model swap at every code-run
         // boundary (start / resume / plan-approve / stop / end) — the only moments when no
@@ -1007,15 +1017,32 @@ if (hereBtn) {
     });
 }
 
-// Restore the last-selected workspace across restarts (main-process root is in-memory only).
+// Restore the last-selected workspace across restarts. The main process now persists and
+// restores it (src/main/ipc/project.js) and answers `projectRoot: null` when nothing was
+// picked, so this block only mirrors that answer into the UI + localStorage. It must never
+// substitute the app's own folder for a workspace.
 (async () => {
+    let root = null;
+    let restoreError = null;
+    try {
+        const r = await window.api.invoke('project-get-root');
+        root = r?.projectRoot || null;
+        restoreError = r?.restoreError || null;
+    } catch (e) { /* non-fatal */ }
+    if (root) {
+        try { localStorage.setItem('agentsmith_workspace', root); } catch (e) { /* private mode */ }
+        updateWorkspaceStatus(root);
+        return;
+    }
+    // First start after upgrading from a build that kept the workspace in localStorage only.
     const saved = localStorage.getItem('agentsmith_workspace');
     if (saved) {
         const ok = await applyWorkspace(saved, { announce: false });
-        if (!ok) localStorage.removeItem('agentsmith_workspace');
-    } else {
-        updateWorkspaceStatus(null);
+        if (ok) return;
+        localStorage.removeItem('agentsmith_workspace');
     }
+    updateWorkspaceStatus(null);
+    if (restoreError) addMessage('system', `⚠️ ${restoreError}`);
 })();
 
 let currentApiBase = 'http://127.0.0.1:1234'; 
@@ -3492,7 +3519,9 @@ async function sendMessage() {
         trace.addStep('routing.selected_capability', 'routing', 'error', 'NO_MODEL', 0, 'No model selected');
         trace.close();
         releaseSendSlot(); // v53.1: early return — give the slot back so the user can retry
-        addMessage('system', '**No model selected.** LM Studio isn\'t serving a model the app can see. In LM Studio, load a model (or enable the local server / JIT), then pick it from the model dropdown — or just reselect it once and the app will remember it.');
+        addMessage('system', activeProvider === 'ollama'
+            ? '**No model selected.** Ollama isn\'t serving a model the app can see. Run `ollama list` to see what is pulled, pull one if needed (e.g. `ollama pull qwen3:8b`), then pick it from the model dropdown — or just reselect it once and the app will remember it.'
+            : '**No model selected.** LM Studio isn\'t serving a model the app can see. In LM Studio, load a model (or enable the local server / JIT), then pick it from the model dropdown — or just reselect it once and the app will remember it.');
         return;
     }
 
@@ -3772,7 +3801,7 @@ My Query: ${text}`;
         // per-run (a later run re-evaluates) and one-shot (if it overflows AGAIN at max, the
         // history is genuinely too big — the honest error surfaces instead of looping).
         let ctxAutoExpanded = false;
-        window._recentToolSigs = []; // per-run sliding window for the anti-loop guard
+        window._toolLoopStreak = { sig: null, n: 0 }; // per-run anti-loop guard: RUN of identical batches
         // v52.7: INFINITE TURNS — no step cap. The "Thinking Steps" slider is gone; a run
         // ends only when the model stops calling tools, the user hits Stop, or a hard
         // safety guard fires (tool loop / repeated errors). turnCount stays for display.
@@ -4004,7 +4033,7 @@ My Query: ${text}`;
             // The old fixed 5-min abort CUT OFF runs that were still generating/processing. Now the
             // window extends in steps up to FIRST_BYTE_MAX_MS before declaring a real timeout — "still
             // busy" is never mistaken for "dead". Model-agnostic: it keys on wire silence, not family.
-            const REQUEST_TIMEOUT_MS = Math.max(parseInt(localStorage.getItem('agentsmith_request_timeout') || '300000', 10), 60000);
+            const REQUEST_TIMEOUT_MS = Math.max(parseInt(localStorage.getItem('agentsmith_request_timeout') || '900000', 10), 60000);
             const FIRST_BYTE_MAX_MS = 900000; // 15 min — matches the first-chunk window below
             let requestTimedOut = false;
             let reqTimeoutId = null;
@@ -4012,7 +4041,7 @@ My Query: ${text}`;
                 const spent = Date.now() - startGen;
                 if (spent >= FIRST_BYTE_MAX_MS) {
                     requestTimedOut = true;
-                    abortController.abort(new Error(`Request timeout after ${FIRST_BYTE_MAX_MS / 1000}s — no response from LM Studio. The model may have failed to load or the engine crashed.`));
+                    abortController.abort(new Error(`Request timeout after ${FIRST_BYTE_MAX_MS / 1000}s — no response from ${activeBackendLabel()}. The model may have failed to load or the engine crashed.`));
                     return;
                 }
                 reqTimeoutId = setTimeout(armFirstByteCheck, Math.min(REQUEST_TIMEOUT_MS, FIRST_BYTE_MAX_MS - spent));
@@ -4052,7 +4081,7 @@ My Query: ${text}`;
                         clearTimeout(reqTimeoutId);
                     }
                     if (requestTimedOut && !fetchErr) {
-                        fetchErr = new Error(`Request timeout after ${FIRST_BYTE_MAX_MS / 1000}s — no response from LM Studio. The model may have failed to load or the engine crashed.`);
+                        fetchErr = new Error(`Request timeout after ${FIRST_BYTE_MAX_MS / 1000}s — no response from ${activeBackendLabel()}. The model may have failed to load or the engine crashed.`);
                     }
                     if (!fetchErr) break; // got a response object (may still be non-2xx, handled below)
                     const decision = RETRY_POLICY
@@ -4066,7 +4095,7 @@ My Query: ${text}`;
             }
 
             if (requestTimedOut) {
-                throw new Error(`Request timeout after ${FIRST_BYTE_MAX_MS / 1000}s — no response from LM Studio. The model may have failed to load or the engine crashed.`);
+                throw new Error(`Request timeout after ${FIRST_BYTE_MAX_MS / 1000}s — no response from ${activeBackendLabel()}. The model may have failed to load or the engine crashed.`);
             }
 
             if (!res.ok) {
@@ -4087,7 +4116,7 @@ My Query: ${text}`;
                 // v53.6: actionable failure text (parity with Code Mode's classifyHttpError):
                 // a context overflow says "lower the context slider", a load failure says
                 // "pick a model that fits VRAM" — never a raw engine dump the user can't act on.
-                let classified = window.XKStreamSignals?.classifyHttpError?.({ status: res.status, body: errorText });
+                let classified = window.XKStreamSignals?.classifyHttpError?.({ status: res.status, body: errorText, label: activeBackendLabel() });
                 // v56.4: the auto-expand guardrail is LM Studio-only — it reloads the model
                 // through LM Studio's management API (lms CLI), which Ollama does not have.
                 if (classified && classified.isContextOverflow && !ctxAutoExpanded && activeProvider !== 'ollama') {
@@ -4200,18 +4229,39 @@ My Query: ${text}`;
                 ? `<details class="thinking"${open ? ' open' : ''}><summary class="thinking-summary">💭 Reasoning</summary><div class="thinking-body">${window.markedParse(STRIP_CTRL(reasoningContent))}</div></details>`
                 : '';
             const paintHtml = (raw) => `<span class="loading-pulse">${window.SmithPersona.pickLoadingPhrase('chat', turnCount)} — Step ${turnCount}${genBadge()}</span><br><br>${existingText ? existingText + '<br><br>' : ''}${thinkingBlock(true)}${window.markedParse(STRIP_CTRL(raw))}`;
+            // v56.5.3: follow new thoughts in the Reasoning panel. Repainting botDiv replaces the
+            // panel's DOM (and resets its scroll box), so remember the reader's position and put it
+            // back: pinned at the bottom = keep following new thoughts, scrolled up = stay there.
+            const REASON_PIN_PX = 24;
+            const readReasonScroll = () => {
+                const body = botDiv.querySelector('.thinking .thinking-body');
+                if (!body) return null;
+                return {
+                    pinned: (body.scrollHeight - body.scrollTop - body.clientHeight) <= REASON_PIN_PX,
+                    top: body.scrollTop
+                };
+            };
+            const paint = (html) => {
+                const keep = readReasonScroll();
+                botDiv.innerHTML = html;
+                if (!keep) return;
+                const body = botDiv.querySelector('.thinking .thinking-body');
+                if (body) body.scrollTop = keep.pinned ? body.scrollHeight : keep.top;
+            };
             const paintStream = (typeof window.createThrottledRenderer === 'function')
-                ? window.createThrottledRenderer((raw) => { botDiv.innerHTML = paintHtml(raw); }, 80)
+                ? window.createThrottledRenderer((raw) => paint(paintHtml(raw)), 80)
                 : null;
-            const emitStream = (raw) => { lastStreamedContent = raw; if (raw && String(raw).trim()) silentTurns = 0; if (paintStream) paintStream(raw); else botDiv.innerHTML = paintHtml(raw); };
+            const emitStream = (raw) => { lastStreamedContent = raw; if (raw && String(raw).trim()) silentTurns = 0; if (paintStream) paintStream(raw); else paint(paintHtml(raw)); };
             // v52.7: first token of ANY kind flips the live state to 'generating' — model-agnostic.
             const noteGenDelta = () => {
                 if (genState === 'waiting') genState = 'generating';
             };
             while (true) {
-                // Increase timeout significantly for the first chunk to allow for model reloading/context processing after a VRAM flush.
-                // 15 minutes for the first chunk, 5 minutes for subsequent chunks.
-                const currentTimeoutMs = isFirstChunk ? 900000 : 300000; 
+                // 15 minutes for the first chunk (model reload / VRAM flush / prompt processing),
+                // and 15 minutes for every later chunk too: a slow local model can think for
+                // minutes before emitting the next token, and the old 5-minute line cut those
+                // generations off mid-reasoning on modest hardware (reported in Code Mode).
+                const currentTimeoutMs = 900000;
                 
                 if (isFirstChunk) {
                     botDiv.innerHTML = `<span class="loading-pulse" style="color: var(--warning-color)">Warming up model and processing context...${genBadge()} (This may take a moment after a resource flush)</span><br><br>${existingText}`;
@@ -4456,30 +4506,47 @@ My Query: ${text}`;
                 // repeated MUTATING calls (same click/type/etc. args) count.
                 const READONLY_TOOLS = new Set(['list_processes', 'read_process_log', 'list_directory', 'read_file', 'grep_project', 'glob_files', 'memory_search']);
                 const allReadOnly = validToolCalls.length > 0 && validToolCalls.every(t => READONLY_TOOLS.has(t.function?.name));
+                // v56.5.3: only a RUN of identical calls is a loop.
+                // The signature covers the FULL arguments, so a write that adds something new is
+                // a different call. But the old sliding window (8 batches, never cleared by
+                // progress) still counted the SAME `powershell … / node …` check re-run after
+                // every new write as one stuck loop — nudge on the second, hard stop on the
+                // fourth — and killed a healthy coding run that was making progress each turn.
+                // A batch that differs from the previous one now resets the run, exactly like the
+                // Code Mode duplicate budget. (Alternating A/B loops are no longer a stop
+                // condition; the failure-streak, no-progress and completion guards still cover
+                // those.)
+                const callLabel = (t) => {
+                    const n = t.function?.name || 'tool';
+                    const a = t.function?.arguments || {};
+                    const detail = String(a.command || a.path || a.query || a.pattern || a.url || '').replace(/\s+/g, ' ').trim();
+                    return detail ? `${n}("${detail.length > 100 ? detail.slice(0, 100) + '…' : detail}")` : n;
+                };
                 const currentSig = JSON.stringify(validToolCalls.map(t => ({ name: t.function?.name, args: t.function?.arguments })));
-                window._recentToolSigs = window._recentToolSigs || [];
+                window._toolLoopStreak = window._toolLoopStreak || { sig: null, n: 0 };
                 if (!allReadOnly) {
-                    const repeats = window._recentToolSigs.filter(s => s === currentSig).length;
-                    if (repeats >= 3) {
-                        // Genuinely stuck repeating the SAME mutating action. Stop honestly.
-                        console.warn("Tool loop: hard stop after repeated identical mutating calls.");
+                    const streak = window._toolLoopStreak;
+                    streak.n = (streak.sig === currentSig) ? streak.n + 1 : 1;
+                    streak.sig = currentSig;
+                    if (streak.n >= 4) {
+                        // Genuinely stuck repeating the SAME mutating action, four batches in a row.
+                        console.warn('Tool loop: hard stop after 4 consecutive identical mutating calls.');
                         const msg = "I repeated the same action several times without it changing anything, so I stopped to avoid spinning. If you can see what's blocking it (or tell me to try a different element), I'll continue.";
                         convo.push({ role: 'assistant', content: msg });
                         payloadHistory.push({ role: 'assistant', content: msg });
                         botDiv.innerHTML = window.markedParse(msg);
                         finished = true; persist(); continue;
                     }
-                    if (repeats >= 1 && turnCount > 1) {
-                        console.warn("Tool loop detected (repeat in window). Nudging.");
-                        const nudge = "[GUARD RAIL] You already made this exact tool call. If it didn't move you forward, do something DIFFERENT (a different element, or report what you see). If it DID work (e.g. your message now appears in the thread), say so and finish — do not repeat it.";
+                    if (streak.n >= 2 && turnCount > 1) {
+                        console.warn('Tool loop detected (identical call repeated). Nudging.');
+                        // NAME the call. The old text only said "this exact tool call", so the
+                        // v56.5.3 run spent a whole reasoning block blaming a write_file that was
+                        // never flagged, instead of changing the call that actually repeated.
+                        const nudge = `[GUARD RAIL] You already made this exact tool call: ${validToolCalls.map(callLabel).join(', ')}. Nothing changed between the two calls. If it didn't move you forward, do something DIFFERENT (different arguments, a different file/command, or report what you see). If it DID work, say so and finish — do not repeat it.`;
                         convo.push({ role: 'user', content: nudge });
                         payloadHistory.push({ role: 'user', content: nudge });
-                        window._recentToolSigs.push(currentSig);
-                        if (window._recentToolSigs.length > 8) window._recentToolSigs.shift();
                         continue;
                     }
-                    window._recentToolSigs.push(currentSig);
-                    if (window._recentToolSigs.length > 8) window._recentToolSigs.shift();
                 }
 
                 const apiToolCalls = validToolCalls.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.function.name, arguments: typeof tc.function.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function.arguments) } }));
@@ -4630,7 +4697,7 @@ My Query: ${text}`;
                 await new Promise(r => setTimeout(r, 1500)); // Increased VRAM relief delay
                 continue; // V38 FIX: Ensure loop restarts to send tool results back to the model
             } else {
-                window._lastToolCallSignature = null; window._recentToolSigs = []; // Clear on success
+                window._lastToolCallSignature = null; window._toolLoopStreak = { sig: null, n: 0 }; // text-only reply = progress; reset the loop guard
                 // BUG FIX: If model is silent after tool results, nudge it.
                 if (turnCount > 1 && (!fullContent || fullContent.trim().length < 2)) {
                     silentTurns++;

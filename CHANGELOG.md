@@ -1,5 +1,221 @@
 # Agent Smith Changelog
 
+## [56.5.2] - 2026-11-18 — 🧭 A run can no longer build in Agent Smith's own folder, and three ways of looking busy are gone
+
+This release comes out of a build that failed, wrote **zero deliverables**, and still ended
+with a green "Acceptance (game) 6/6" in the completion gate. The task was a single-level Super
+Mario web game. The run read `app/examples/pacman/*`, tried to write into the app's own tree,
+ran 12 turns without writing a file, and was only stopped by "No files written in 12 turns".
+The same goal then finished on a stronger model — so the model mattered, but every item below
+is a case where the harness *accepted, graded or rewarded* work that had not happened. Those
+are fixed here, each with a regression test.
+
+### The model's answers between tool calls disappeared
+
+Code Mode fed the content channel and the reasoning channel into **one** stream and drew both
+in the per-turn "Reasoning" panel. That panel is intentionally wiped on the next `turn_start`,
+so everything the model *said* — a conclusion ("the wrapper is swallowing my `$` variables"), a
+mid-run report, an explanation of a failed attempt — vanished together with its thinking. The
+user could watch a sentence appear and then disappear one turn later.
+
+- **`src/code/loop/streamCompletion.js`** — new `onReasoning` hook; content still goes to
+  `onDelta`. Callers that pass only `onDelta` keep the old merged behaviour.
+- **`src/code/loop/turnLoop.js`** — emits `assistant_delta` (model's words) and
+  `reasoning_delta` (thinking) as separate events.
+- **`src/renderer/timeline/activityTimeline.js`** — `assistant_delta` streams into a persistent
+  `.activity-note` block (plain text while streaming, markdown once the turn's tool call or the
+  turn end arrives); `reasoning_delta` keeps the existing per-turn Reasoning panel. `delta` from
+  older builds still renders as reasoning.
+- **`src/renderer/styles/overlay.css`** — `.activity-note` styling (muted card, accent rail).
+
+### The workspace was remembered, but never authoritative
+
+The selected project folder survived a restart only through the renderer's `localStorage`, and
+the main process kept it **in memory only**. Worse, `project-get-root` answered with
+`process.cwd()` while nothing was picked — and when Agent Smith runs under Pinokio, its cwd is
+its own install folder. "No workspace selected" and "workspace = Agent Smith's repo" were
+therefore indistinguishable, so the renderer's "No workspace selected" warning and Code Mode's
+HOME fallback could never fire. A run that started before the renderer's async restore — or
+after a restore failed because the saved folder was gone — silently built inside the app's own
+source tree.
+
+- **`src/main/ipc/project.js`** — the root is persisted to `<userData>/workspace.json` and
+  restored **synchronously at IPC registration**, before any handler can answer. `project-set-root`
+  writes it through; a saved folder that no longer exists produces `restoreError`, drops the dead
+  path, and is reported to the user once instead of degrading to cwd.
+- `project-get-root` returns `projectRoot: null` when nothing is picked (plus `cwd` as
+  information only, never as the workspace). `code-list-sessions` uses `getRootOrNull()` too, so
+  the resume lookup no longer searches the app's own folder.
+- **`src/renderer/app.js`** — the restore block mirrors the main-process answer into the UI and
+  `localStorage` (which is now the upgrade path for builds that kept the root there only).
+
+### Harness bookkeeping is not progress
+
+`.agentsmith/PLAN.md` / `IMPLEMENT.md` are written by the harness, but a `write_file` on them
+counted as a touched deliverable, reset the no-progress guard, and was logged **back into
+IMPLEMENT.md** — so a weak model could keep "doing something" forever by rewriting its own log.
+The Mario ledgers show exactly that loop.
+
+- **`planArtifacts.isArtifactPath()`** (new) flags the bookkeeping tree; `turnLoop`, `runCode`,
+  `middleware` and `PlanAnchor.recordDone` use it: no touched-file entry, no ledger/IMPLEMENT
+  echo, no reset of `_turnHadEdit`.
+- A write to one of those files gets a one-time `[HARNESS — HARNESS-OWNED FILE]` nudge (at most
+  twice per run) instead of silence.
+- Prompt rules 11 and 16 now say the harness maintains those files, and that editing them is not
+  progress.
+
+### A green shell check that proves nothing
+
+On Windows `$?` is True/False and the process exit code belongs to the **last** statement of a
+`;` chain, so `node --check script.js; echo "EXIT=$?"` prints `EXIT=True` and exits 0 even when
+the file does not parse. The Mario ledgers filed that as a passed test, and it satisfied
+TEST-BEFORE-DONE.
+
+- **`shared/longBuildPolicy.vacuousVerificationReason()`** — detects `$?`/`%ERRORLEVEL%` probes on
+  Windows that do not propagate the real status (`exit $LASTEXITCODE` counts as real).
+- `run_command` returns `verification_warning`; it is shown in the activity timeline as
+  "No verification (shell state, not a result)", and it no longer sets `testRunsSinceEdit` or
+  `agentRanOkAfterEdit` — so it cannot unblock completion.
+
+### The shell is named, and PowerShell parse errors are explained
+
+The tool schema said "bash" on every platform. Models wrote `&&` chains for Windows PowerShell
+5.1, which rejects them **at parse time**: nothing ran, stdout was empty, and the model saw only
+"exit code 1" — then re-probed the same command for turns.
+
+- `run_command` / `run_shell_command` descriptions now name the real shell (PowerShell: no `&&`,
+  use `;` and `$LASTEXITCODE`; `/bin/sh`: `&&` and `$?`).
+- **`projectContext.resolvePwsh()`** prefers PowerShell 7 when installed (it parses `&&`) and
+  falls back to 5.1.
+- A failed command whose stderr contains `ParserError` gets a `remediation` that says the command
+  never ran and why — separate advice for an operator chain vs. broken quoting.
+
+### Errors name the backend that answered
+
+LM Studio and Ollama share one client, so every failure said "LM Studio" — including Ollama
+template errors, which sent users to debug the wrong server.
+
+- **`src/shared/backendLabel.js`** (new) maps provider/URL → `Ollama` | `LM Studio`; the renderer
+  forwards the active provider with every code run (`provider` threaded through `runCodeTask`,
+  `turnLoop`, `planningPhase`, `milestoneSubagents`, `ipc/code.js`).
+- `streamCompletion`, `classifyHttpError` and the chat error paths use the label; the
+  "reasoning model" advisory points at LM Studio's per-model switch or this app's 🧠 THINK
+  toggle, depending on the backend; "no model selected" names the right server and fix.
+
+### The completion gate no longer grades the workspace's own app
+
+With zero files written, the deep `index.html` fallback scanned the workspace anyway — and when
+that workspace was the app's repo, it graded Agent Smith's own renderer: its settings toggles
+passed as "game" DOM checks and `dist/renderer/bundle.js` as the smoke test.
+
+- **`completionGate.js`** — the deep scan now requires `files.length`: reuse validates the entry
+  point around a file this run actually touched. Nothing written means nothing to validate, and
+  the gate says so.
+
+### Page checks run on a real Chromium when Electron is mocked
+
+Under the Pinokio host the app runs on a mocked Electron: a `BrowserWindow` object exists without
+an engine, so `browser_verify` and the gate's runtime check silently degraded to "skipped" and
+the model guessed whether its page runs.
+
+- **`src/main/services/puppeteerBrowser.js`** (new, `puppeteer` as optionalDependency) — loads the
+  page in headless Chromium, collects console errors / uncaught exceptions / failed requests, and
+  evaluates DOM checks with per-check timeouts. Uses puppeteer's Chrome build, else
+  `puppeteer-core` with a system Chrome/Chromium/Edge.
+- `browserVerify.js` and `runtimeBrowserCheck.browserCheck()` fall back to it only when the
+  Electron window is unusable; a caller-injected window stays authoritative, cleanup can no
+  longer throw over a result, and a missing browser degrades to `skipped` with one install hint
+  (`npx puppeteer browsers install chrome`). `XK_CODE_NO_RUNTIME_VERIFY=1` still disables it.
+
+### A failed write could never be retried, and a malformed call crashed instead of explaining
+
+`TurnDedup.reset()` cleared only the same-turn memory, so its failure memory survived every
+turn for the whole run: after one failed `write_file`, a retry with the same arguments was
+answered "Duplicate call this turn" for the rest of the run — while the reason text claimed a
+same-turn dedupe that had not happened. The recovery the harness itself prescribes (`read_file`,
+then retry) could not work, because nothing ever unlocked the block.
+
+The trigger was a malformed call: `write_file` without a `content` string reached
+`fs.writeFile(path, undefined)` and surfaced Node's raw `The "data" argument must be of type
+string` — naming neither the tool nor the field, so the model could only guess what to change.
+
+- **`tools/dedup.js`** — the failure memory stores the original error per signature and is
+  unlocked by `clearFailuresForPath()`; `turnLoop` calls it after a successful `read_file` of
+  that path (or `read_host_file`), alongside the existing "any successful write clears failures".
+  A blocked identical retry now reads `BLOCKED — this exact write_file request already failed
+  earlier in this run on "script.js": <reason>` and names the read-then-retry step, while a
+  genuine same-turn duplicate keeps its own wording.
+- **`tools/executor.js`** — `write_file` and `append_file` validate that `content` is a string and
+  return `write_file requires "content" … NOTHING was written`, naming the key actually sent
+  (`data`, `code`, `text`, …).
+- **`turnLoop.js`** — a content-less `write_file` gets the `[HARNESS — MALFORMED write_file]`
+  nudge with the exact `{"path":…,"content":…}` shape, so the next turn can succeed.
+- Pinned in `tests/codeMode.test.js`: read-then-retry unlocks, a failure on another path stays
+  blocked, and a `write_file` whose text arrived as `data` returns the actionable error without
+  creating a file.
+
+### Five-minute walls, a cumulative duplicate budget, and two panel states that lied
+
+Long runs on slow hardware kept dying at the same 300 s line: a `run_command` that was still
+working, and a model that was still thinking. Both defaults are now 15 minutes.
+
+- **Timeouts** — `longBuildPolicy.DEFAULT_EXCLUSIVE_BOUND_MS` (pipeline bound + foreground
+  shell) is 900 000 ms, overridable via `XK_CODE_CMD_TIMEOUT_MS`; the chat/Code renderer's
+  request timeout and every post-first-chunk window are 900 000 ms too (previously the first
+  chunk got 15 min and every later chunk 5 min — the exact line that cut off slow local models
+  mid-reasoning). Tool descriptions and the system prompt now say 15 minutes.
+- **Duplicate budget** — `EarlyStopDetector` counted duplicates for the WHOLE run, so a long
+  session that repeated eight calls across hours (re-reading a file, re-running a check) was
+  killed as "Too many duplicate tool calls". Only a run of consecutive duplicates counts now;
+  any distinct call resets it, and `XK_CODE_MAX_DUPLICATE_TOOLS` overrides the threshold.
+- **Folder icon without a workspace** — the 📁 button still lit up live green on hover when no
+  project folder was set, so a missing workspace looked ready. It stays amber until
+  `contextLabel.js` marks the button `ctx-folder--set`.
+- **Reasoning panel** — the panel's body is rewritten on every streamed delta, which reset its
+  scroll box and pushed the reader back to the top. It now follows new thoughts while the
+  reader is at the bottom and holds the position once they scroll up (chat `.thinking-body`
+  and the Code Mode `.activity-thinking-body`).
+
+### The anti-loop guard stopped a run that was not looping
+
+A run that wrote a fresh version of the same file every turn was killed as a “tool loop”. The
+guard compared batches against a sliding window of 8 batches that was never cleared by
+progress, so the same `powershell <script>` check re-run after every rewrite accumulated in the
+window: nudge on the second, hard stop on the fourth — while the workspace changed each turn.
+
+- Only a **run** of identical batches counts now, and the signature still covers the full
+  arguments, so a write with new content is a different call. Any different batch resets it.
+- The nudge **names** the call that repeated (`run_command("powershell …")`). Without that,
+  the model guessed and spent a whole reasoning block arguing about a `write_file` that the
+  guard had never flagged.
+
+### Verification
+
+- `node scripts/run-unit-tests.js tests/ipcHandlers.test.js tests/ipcResilience.test.js
+  tests/projectRoot.test.js tests/codeResumeGuard.test.js tests/securityPolicy.test.js` → 24/24
+  green (the workspace test now covers fresh install → `null`, pick → persisted, restart →
+  restored, deleted folder → `null` + `restoreError`).
+- The suites this release touches → **89/89 green**: `tests/puppeteerBrowser.test.js
+  tests/modelHarness.test.js tests/planArtifacts.test.js tests/longBuildPolicy.test.js
+  tests/ipcHandlers.test.js tests/codeMode.test.js tests/qwenThinkingFix.test.js
+  tests/projectRoot.test.js tests/ipcResilience.test.js tests/codeResumeGuard.test.js
+  tests/streamSignals.test.js` (including the new `puppeteerBrowser`, strict-template
+  normalization for every family, `isArtifactPath` + no self-logging, and the vacuous
+  exit probe).
+- **`npm test` is NOT fully green on a Windows dev box** — 1140 tests, 1112 pass, 26 fail.
+  Every failure is in a file this release does not touch and is environment-bound: no
+  `cloudflared` installed (`code -4058`), `fs.symlinkSync` EPERM without developer mode, no
+  Piper binary and no `sd-cli`, AppImage directory permissions, `\` vs `/` in the spill-path
+  assertion, and `tests/whatsappChrome.test.js` expecting no system-Chrome fallback while
+  Chrome is installed. Recorded here rather than hidden.
+- The zero-file gate regression is pinned in `tests/codeMode.test.js`: a fixture whose `app/`
+  looks like a game must yield `acceptance.applicable: false`, `smoke.skipped`, and no
+  `[DOM]`/`[SMOKE]` message.
+- `node --check` on every edited script; `dist/renderer/bundle.js` rebuilt.
+- Not verified here: the mocked-Electron fallback against a live Pinokio host (the unit test uses
+  a BrowserWindow mock shaped like `pinokio-server.js`), and the Mario goal itself — it was
+  completed by a stronger model, not by this release.
+
 ## [56.5.1] - 2026-11-06 — 🐞 Code Mode can be switched off again + a provider switch restores the 32000 CT default
 
 Code Mode could not be controlled and could not be trusted to stay out of the way. Two

@@ -70,7 +70,32 @@ function isVerificationCommand(command) {
     return VERIFICATION_RES.some(re => re.test(cmd));
 }
 
-const DEFAULT_EXCLUSIVE_BOUND_MS = 300000;                 // 5 min (unchanged default)
+// A "verification" that cannot fail proves nothing. On Windows the shell reports the exit
+// status of the LAST statement in a `;` chain and `$?` is a Boolean, so
+// `node --check x.js; echo "EXIT=$?"` prints `EXIT=True` and exits 0 even when x.js does not
+// parse — the exact pattern in the Super Mario ledgers, filed as a passed test. Returns the
+// reason to hand back to the model, or null when the exit status is trustworthy.
+const EXIT_PROBE_RE = /(\$LASTEXITCODE|\$\?|%ERRORLEVEL%)/i;
+// Commands that DO propagate the real status instead of printing shell state.
+const REAL_STATUS_RE = /exit\s+\$LASTEXITCODE|exit\s+%ERRORLEVEL%|(?:^|[;\s&])exit\s+\d+/i;
+
+function vacuousVerificationReason(command, platform = process.platform) {
+    const cmd = String(command || '');
+    if (platform !== 'win32') return null;
+    if (!EXIT_PROBE_RE.test(cmd)) return null;
+    if (REAL_STATUS_RE.test(cmd)) return null;
+    return 'This run does NOT verify anything: in PowerShell `$?` is True/False (not an exit code), and the '
+        + 'process exit code belongs to the LAST statement of a `;` chain — usually `echo` — so exit_code 0 '
+        + 'here says nothing about the command you meant to check. It is not evidence; do not report it as a '
+        + 'passed test. Run the check on its own and read its exit_code, or end the command with '
+        + '`if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`.';
+}
+
+// 15 min. The old 5-minute default was reported as a real wall in Code Mode: a slow local
+// model (or a big test/install run) that needs more than five minutes got "Command timed
+// out" while still working. Recognized long builds keep their 60-minute window; this only
+// raises the default for everything else. Override with XK_CODE_CMD_TIMEOUT_MS.
+const DEFAULT_EXCLUSIVE_BOUND_MS = Number(process.env.XK_CODE_CMD_TIMEOUT_MS) || 900000; // 15 min
 const MAX_CMD_MS = Number(process.env.XK_CODE_MAX_CMD_MS) || 4 * 3600000; // 4 h ceiling
 
 /** Requested timeout from the model, clamped into [1s, MAX_CMD_MS]. 0/invalid → null. */
@@ -86,7 +111,7 @@ function clampRequestedTimeout(value) {
  * the model gets a real exit report instead of an orphaned process):
  *   - explicit args.timeout_ms → that value (+ small slack on the outer bound)
  *   - recognized long build    → XK_CODE_BUILD_TIMEOUT_MS (default 60 min)
- *   - anything else            → the default exclusive bound.
+ *   - anything else            → the default exclusive bound (15 min).
  */
 function exclusiveBoundFor(name, args, baseMs = DEFAULT_EXCLUSIVE_BOUND_MS) {
     if (name !== 'run_command' || (args && args.is_background)) return baseMs;
@@ -123,6 +148,7 @@ module.exports = {
     MAX_CMD_MS,
     isLongBuildCommand,
     isVerificationCommand,
+    vacuousVerificationReason,
     clampRequestedTimeout,
     exclusiveBoundFor,
     foregroundTimeoutFor,

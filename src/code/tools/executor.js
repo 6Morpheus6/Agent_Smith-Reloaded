@@ -244,6 +244,19 @@ async function executeTool(name, args, deps) {
             if (!a.path || !String(a.path).trim()) {
                 return { error: 'write_file requires a "path" (e.g. {"path":"src/app.js","content":"..."}). You sent no path — retry with both path and the full file content.' };
             }
+            // The file text is the payload. A model that puts it under another key (`data`,
+            // `code`, `text`, `body`) or sends an object used to reach fs.writeFile with
+            // `undefined` and get Node's raw `TypeError: The "data" argument must be of type
+            // string` — an error naming neither write_file nor the field to fix, so the model
+            // had no way to self-correct (v56.5.2 Super Mario run). Name the field instead.
+            if (typeof a.content !== 'string') {
+                const sent = Object.keys(a).filter(k => k !== 'path');
+                return {
+                    error: `write_file requires "content" (a STRING with the complete file text). ` +
+                        `You sent ${sent.length ? `"${sent[0]}"` : 'no content field'} instead, so NOTHING was written. ` +
+                        `Retry: write_file {"path":"${a.path}","content":"<complete file text>"}.`
+                };
+            }
             const chunkErr = checkWriteChunkSize(a.content);
             if (chunkErr) return chunkErr;
             if (String(a.content || '').length > MAX_WRITE_CHARS) {
@@ -295,6 +308,9 @@ async function executeTool(name, args, deps) {
         case 'append_file': {
             if (!a.path || !String(a.path).trim()) {
                 return { error: 'append_file requires "path" and "content". Create the file first with write_file.' };
+            }
+            if (typeof a.content !== 'string') {
+                return { error: 'append_file requires "content" (a STRING with the new text to add at the end). Nothing was appended.' };
             }
             const chunkErr = checkWriteChunkSize(a.content);
             if (chunkErr) return chunkErr;

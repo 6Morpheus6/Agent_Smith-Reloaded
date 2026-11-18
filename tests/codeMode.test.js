@@ -79,6 +79,43 @@ test('dedup remembers failed calls across turns until a write makes progress', (
     assert.equal(d.isDuplicate('patch', args), false);
 });
 
+test('dedup unlocks a failed write after the model reads that path again', () => {
+    // Regression: the block used to be permanent for the whole run, so the recovery step the
+    // harness itself demands (read_file, then retry) could never actually retry.
+    const d = new TurnDedup();
+    const args = { path: 'script.js', content: 'const a = 1;\n' };
+    assert.equal(d.isDuplicate('write_file', args), false);
+    d.recordResult('write_file', args, false, { error: 'The "data" argument must be of type string' });
+    d.reset();
+    assert.equal(d.isDuplicate('write_file', args), true, 'byte-identical retry stays blocked');
+    assert.match(d.failureReason('write_file', args) || '', /data/, 'the original error is available to show');
+
+    d.clearFailuresForPath('script.js');
+    d.reset();
+    assert.equal(d.isDuplicate('write_file', args), false, 'reading the path unlocks the retry');
+
+    // A failure on another path is untouched by that unlock.
+    const other = { path: 'style.css', content: 'body{}' };
+    assert.equal(d.isDuplicate('write_file', other), false);
+    d.recordResult('write_file', other, false, { error: 'boom' });
+    d.clearFailuresForPath('script.js');
+    d.reset();
+    assert.equal(d.isDuplicate('write_file', other), true);
+});
+
+test('earlyStop only kills a RUN of duplicate tool calls', () => {
+    // Regression: the duplicate counter was cumulative for the whole run, so a long session
+    // that repeated eight calls across hours died as if it were stuck in a loop.
+    const { EarlyStopDetector: Det } = require('../src/code/governor/earlyStop.js');
+    const det = new Det({ maxDuplicateTools: 3 });
+    const dup = () => det.onToolResult(false, true).stop;
+    assert.equal(dup(), false);
+    assert.equal(det.onToolResult(true, false).stop, false, 'a distinct call is progress');
+    assert.equal(dup(), false);
+    assert.equal(dup(), false);
+    assert.equal(dup(), true, 'three duplicates in a row stop the run');
+});
+
 test('checkWriteChunkSize rejects oversized write_file payloads', () => {
     const big = 'line\n'.repeat(MAX_WRITE_LINES + 1);
     const err = checkWriteChunkSize(big);
@@ -119,6 +156,14 @@ test('executor write_file + ledger snapshot', async () => {
     assert.equal(r.success, true);
     const diff = await ledger.diff(sessionId);
     assert.ok(diff.fileCount >= 1);
+
+    // A write whose file text arrived under the wrong key must be a clear tool error that
+    // names the field — not Node's raw `The "data" argument must be of type string`, and
+    // certainly not a file on disk.
+    const bad = await executeTool('write_file', { path: 'page.html', data: '<h1>x</h1>' }, deps);
+    assert.match(String(bad.error || ''), /requires "content"/i);
+    assert.match(String(bad.error || ''), /NOTHING was written/i);
+    assert.ok(!fs.existsSync(path.join(dir, 'page.html')), 'no file is created from a malformed call');
 });
 
 test('executor append_file grows an existing file', async () => {
@@ -234,6 +279,46 @@ test('completionGate detects truncation and syntax errors', async () => {
     const empty = await checkCompletion(dir, [], 'Build a web based Pac-Man game');
     assert.equal(empty.allow, false, 'build goal with no files must block completion');
     assert.ok(empty.messages.some(m => /no project files/i.test(m)));
+});
+
+test('REGRESSION: zero files written never grades the workspace\'s own app as the deliverable', async () => {
+    const { checkCompletion } = require('../src/code/governor/completionGate.js');
+    const { findIndexHtmlDeep } = require('../src/code/context/fileScan.js');
+    // The Super Mario run that wrote nothing: its workspace was the harness's own repo, and
+    // the gate deep-scanned it, reporting the app's settings toggles as the "game" and
+    // passing all six game-acceptance checks against the app's own HTML.
+    const dir = path.join(os.tmpdir(), `code-gate-ownapp-${Date.now()}`);
+    fs.mkdirSync(path.join(dir, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'app', 'index.html'), [
+        '<!DOCTYPE html><html><body>',
+        '<button id="auto-tune-toggle">tune</button>',
+        '<canvas id="game"></canvas><div id="player"></div><div id="score">0</div>',
+        '<script src="app.js"></script>',
+        '</body></html>'
+    ].join('\n'), 'utf-8');
+    fs.writeFileSync(path.join(dir, 'app', 'app.js'), [
+        'const player = document.getElementById("player");',
+        'document.addEventListener("keydown", () => { player.dataset.moving = "1"; });',
+        'function loop() { requestAnimationFrame(loop); }',
+        'requestAnimationFrame(loop);',
+        'let score = 0;',
+        'score += 1; document.getElementById("score").textContent = score;',
+        'if (score > 10) { /* win */ }',
+        ''
+    ].join('\n'), 'utf-8');
+    // pre-condition: the deep fallback WOULD have found this app (so the guard is what saves us)
+    assert.ok(findIndexHtmlDeep(dir, 4), 'fixture must be reachable by the deep scan');
+
+    const gate = await checkCompletion(
+        dir, [],
+        'Make me a web based game of classic Super Mario that only has a single level and when player reaches the end goal restart the level.',
+        { grindMode: true }
+    );
+    assert.equal(gate.allow, false);
+    assert.equal(gate.acceptance.applicable, false, 'nothing was written, so no acceptance check may pass');
+    assert.equal(gate.smoke.skipped, true);
+    assert.ok(!gate.messages.some(m => /auto-tune-toggle|\[SMOKE\]|\[DOM\]/.test(m)),
+        `gate must not grade an app the run did not write: ${gate.messages.join(' | ')}`);
 });
 
 test('pacman example script passes node --check', async () => {

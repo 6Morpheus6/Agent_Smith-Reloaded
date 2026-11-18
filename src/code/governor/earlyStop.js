@@ -18,7 +18,12 @@ class EarlyStopDetector {
     constructor(opts = {}) {
         this.maxTurns = normalizeMaxTurns(opts.maxTurns === undefined ? null : opts.maxTurns);
         this.maxConsecutiveErrors = opts.maxConsecutiveErrors || 5;
-        this.maxDuplicateTools = opts.maxDuplicateTools || 8;
+        // Duplicate budget. It is about a LOOP, not a lifetime total: only a RUN of
+        // consecutive duplicates counts (see onToolResult). Overridable for long sessions on
+        // slow machines where a model legitimately re-reads the same file many times.
+        this.maxDuplicateTools = opts.maxDuplicateTools
+            || Number(process.env.XK_CODE_MAX_DUPLICATE_TOOLS)
+            || 8;
         // Code Mode is a build/edit loop. If it churns through this many turns without
         // writing ANY file (e.g. read-only exploration that never commits to a change),
         // stop early instead of burning the whole turn budget.
@@ -84,10 +89,19 @@ class EarlyStopDetector {
             }
         }
         if (wasDuplicate) {
+            // Only CONSECUTIVE duplicates count. The counter used to live for the whole run,
+            // so a long session that happened to repeat eight calls across hours (re-reading a
+            // file, re-running a check) was killed as if it were stuck in a loop. Any distinct
+            // call in between is progress and clears the run.
             this.duplicateCount++;
             if (this.duplicateCount >= this.maxDuplicateTools) {
-                return { stop: true, reason: 'Too many duplicate tool calls' };
+                return {
+                    stop: true,
+                    reason: `${this.maxDuplicateTools} duplicate tool calls in a row`
+                };
             }
+        } else {
+            this.duplicateCount = 0;
         }
         return { stop: false };
     }

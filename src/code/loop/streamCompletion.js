@@ -13,6 +13,7 @@ const { tryParseJson } = require('../tools/jsonRepair.js');
 const { stripInlineReasoning } = require('./reasoningStrip.js');
 const { buildToolResponseFormat, parseConstrainedContent } = require('./constrainTools.js');
 const { classifyHttpError } = require('../../shared/streamSignals.js');
+const { backendLabel } = require('../../shared/backendLabel.js');
 const thinkingToggle = require('../../shared/thinkingToggle.js'); // v54.4: 🧠 THINK wire overrides
 
 function apiBase(base) {
@@ -63,10 +64,12 @@ function normalizeToolSchemas(tools) {
 }
 
 async function streamCompletion({
-    apiBaseUrl, model, messages, tools, signal, onDelta, maxTokens, temperature,
+    apiBaseUrl, model, messages, tools, signal, onDelta, onReasoning = null, maxTokens, temperature,
     // Hosted-provider auth (Kimi K3 / Moonshot etc.). null/empty = no Authorization
     // header, which is what local LM Studio expects.
     apiKey = null,
+    // 'ollama' | 'lmstudio' — only used to name the backend in errors (see backendLabel).
+    provider = null,
     requestTimeoutMs = 1800000,
     // Between-token idle window (env-tunable). The FIRST token gets a more generous window
     // because heavy prompt-processing (large context + a big single write_file like script.js)
@@ -87,6 +90,7 @@ async function streamCompletion({
     strictNoThink = false
 }) {
     const url = `${apiBase(apiBaseUrl)}/v1/chat/completions`;
+    const label = backendLabel(provider, apiBaseUrl);
     // v52.7: UNBOUNDED output (max_tokens:-1). LM Studio honors -1 as "no cap" — verified
     // live: a 4k-token prompt + thinking model returns finish_reason:"stop", never "length".
     // The old explicit budget (4096–8192) was the cut-off source for thinking-by-default
@@ -164,7 +168,7 @@ async function streamCompletion({
         const armIdleTimer = (req, ms = inactivityTimeoutMs) => {
             clearTimeout(idleTimer);
             idleTimer = setTimeout(() => {
-                req.destroy(new Error(`LM Studio response stalled for ${ms}ms. If your model is slow or reasoning, increase the timeout via XK_CODE_STREAM_IDLE_MS environment variable.`));
+                req.destroy(new Error(`${label} response stalled for ${ms}ms. If your model is slow or reasoning, increase the timeout via XK_CODE_STREAM_IDLE_MS environment variable.`));
             }, ms);
         };
         const req = lib.request({
@@ -197,11 +201,11 @@ async function streamCompletion({
                     // v52.7: model-agnostic failure classification (streamSignals) — a
                     // context overflow gets an actionable message instead of raw engine text,
                     // and the same rules apply to every family LM Studio can serve.
-                    const classified = classifyHttpError({ status: res.statusCode, body: detail });
+                    const classified = classifyHttpError({ status: res.statusCode, body: detail, label });
                     if (classified.message) {
                         return finish(reject, new Error(`${classified.message}${meta}`));
                     }
-                    finish(reject, new Error(`LM Studio HTTP ${res.statusCode}: ${detail || res.statusMessage || 'request failed'}${meta}`));
+                    finish(reject, new Error(`${label} HTTP ${res.statusCode}: ${detail || res.statusMessage || 'request failed'}${meta}`));
                 });
                 return;
             }
@@ -277,7 +281,13 @@ async function streamCompletion({
                     if (reasoningDelta) {
                         sawReasoning = true;
                         reasoningChars += String(reasoningDelta).length;
-                        if (onDelta) onDelta(reasoningDelta);
+                        // Reasoning and content are DIFFERENT channels to the UI: reasoning is
+                        // ephemeral (a "Reasoning" panel per turn), while the model's own words
+                        // (a conclusion, a mid-run report) are real output and must stay on
+                        // screen. Callers that do not care about the split keep the old merged
+                        // behaviour through the onDelta fallback.
+                        if (onReasoning) onReasoning(reasoningDelta);
+                        else if (onDelta) onDelta(reasoningDelta);
                     }
                     if (delta.tool_calls) {
                         for (const tc of delta.tool_calls) {
@@ -303,7 +313,7 @@ async function streamCompletion({
                 if (!sawAnyDelta && !finishReason && !sawDone) {
                     // "stalled" in the message is load-bearing: turnLoop's bounded-retry path
                     // keys on /stalled|timed out/i — a dead engine is a stall, so retry it.
-                    return finish(reject, new Error('LM Studio stream stalled right after headers with no output (engine may have crashed or the model failed to load mid-request). If this repeats, restart LM Studio or lower the context size.'));
+                    return finish(reject, new Error(`${label} stream stalled right after headers with no output (engine may have crashed or the model failed to load mid-request). If this repeats, restart ${label} or lower the context size.`));
                 }
                 toolCalls = toolCalls.filter(Boolean).map(tc => {
                     const r = tryParseJson(tc.function.arguments);
@@ -361,7 +371,7 @@ async function streamCompletion({
         });
 
         hardTimer = setTimeout(() => {
-            req.destroy(new Error(`LM Studio request timed out after ${requestTimeoutMs}ms (hard limit).`));
+            req.destroy(new Error(`${label} request timed out after ${requestTimeoutMs}ms (hard limit).`));
         }, requestTimeoutMs);
         armIdleTimer(req, firstTokenTimeoutMs); // generous window for prompt-processing / first token
         req.on('error', error => finish(reject, error));
@@ -383,4 +393,4 @@ async function streamCompletion({
     });
 }
 
-module.exports = { streamCompletion, apiBase };
+module.exports = { streamCompletion, apiBase, backendLabel };

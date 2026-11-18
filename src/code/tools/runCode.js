@@ -26,6 +26,7 @@
 const { createDispatchLane } = require('./concurrency.js');
 const { executionMode } = require('./pipeline.js');
 const { WRITE_TOOLS } = require('../loop/phases.js');
+const { isArtifactPath } = require('../context/planArtifacts.js');
 
 const RUN_CODE_NAME = 'run_code';
 
@@ -194,7 +195,8 @@ function createRunCodeExecutor(deps) {
                         session.agentRanOkAfterEdit = false;
                         session.testRunsSinceEdit = false;
                         session._readsSinceLastEdit = 0; // v54.6 gather-before-change
-                        if (rel && !session.filesTouched.includes(rel)) session.filesTouched.push(rel);
+                        // Harness bookkeeping (.agentsmith/*) is not a touched deliverable.
+                        if (rel && !isArtifactPath(rel) && !session.filesTouched.includes(rel)) session.filesTouched.push(rel);
                     } else if (name === 'read_file' || name === 'grep' || name === 'glob') {
                         // v54.6: reads inside a program count as gathering too.
                         session._readsSinceLastEdit = Number(session._readsSinceLastEdit || 0) + 1;
@@ -210,11 +212,13 @@ function createRunCodeExecutor(deps) {
                     if (name === 'run_command' && !subArgs.is_background) {
                         // v54.6: use the SHARED verification policy (was an inline regex that had
                         // drifted from longBuildPolicy — build/package commands didn't count here).
-                        const { isVerificationCommand } = require('../../shared/longBuildPolicy.js');
+                        const { isVerificationCommand, vacuousVerificationReason } = require('../../shared/longBuildPolicy.js');
                         const cmd = String(subArgs.command || '');
                         const isVerification = isVerificationCommand(cmd);
-                        if (!r.error && isVerification) session.testRunsSinceEdit = true;
-                        if (!r.error) session.agentRanOkAfterEdit = true;
+                        // Same rule as the turn loop: a shell-state echo (`EXIT=$?`) proves none.
+                        const vacuous = vacuousVerificationReason(cmd);
+                        if (!r.error && isVerification && !vacuous) session.testRunsSinceEdit = true;
+                        if (!r.error && !vacuous) session.agentRanOkAfterEdit = true;
                     }
                 }
                 // Denials are binding rejections (dsh contract): the program sees a throw.

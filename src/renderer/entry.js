@@ -9,6 +9,7 @@ require('../shared/taskClassifier.js');
 require('../shared/toolPairing.js');
 require('../shared/runtimeProfile.js');
 require('../shared/streamSignals.js'); // v52.7: model-agnostic stream/busy/cut-off signals (window.XKStreamSignals)
+require('../shared/backendLabel.js');  // v56.5.2: provider → backend display name in errors (window.XKBackendLabel)
 require('../shared/sendSlot.js');      // v53.1: single in-flight send slot — double-send guard (window.XKSendSlot)
 require('../shared/ctxGate.js');
 require('../shared/retryPolicy.js');  // v53.6: hermes-grade transient-failure retry (window.XKRetryPolicy)

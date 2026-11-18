@@ -23,7 +23,7 @@ const IGNORE = [
 async function electronBrowserCheck(url, opts = {}) {
     // BrowserWindow is injectable (opts.BrowserWindow) for tests; defaults to Electron's.
     const BW = (opts && opts.BrowserWindow) || BrowserWindow;
-    if (!BW) return { errors: [] }; // not in Electron -> skip (fail-open upstream)
+    if (!BW) return { errors: [], unavailable: true }; // no window at all -> let the caller pick an engine
     const errors = [];
     let win = null;
     try {
@@ -35,6 +35,13 @@ async function electronBrowserCheck(url, opts = {}) {
             webPreferences: hiddenWindowWebPreferences()
         });
         stripCspOnSession(win); // belt-and-suspenders: drop any injected CSP header on this session
+
+        // A real Electron window exposes executeJavaScript; the Pinokio host's mock does not.
+        // Report "unavailable" (instead of silently returning zero errors) so browserCheck()
+        // can run the same page load in real headless Chromium.
+        if (typeof win.webContents?.executeJavaScript !== 'function') {
+            return { errors: [], unavailable: true };
+        }
         win.webContents.on('console-message', (_e, level, message) => {
             if (level >= ERROR_LEVEL && message && !IGNORE.some(re => re.test(message))) {
                 errors.push(String(message));
@@ -62,12 +69,31 @@ async function electronBrowserCheck(url, opts = {}) {
     return { errors };
 }
 
-/** runtimeVerify(projectRoot, htmlRel) for the completion gate — serve + Electron check. */
-async function runtimeVerify(projectRoot, htmlRel) {
-    if (process.env.XK_CODE_NO_RUNTIME_VERIFY === '1' || !BrowserWindow) {
-        return { ok: true, skipped: true, errors: [] };
-    }
-    return serveAndCheck(projectRoot, htmlRel, electronBrowserCheck);
+/**
+ * Engine-selecting page check: a real Electron window when available, otherwise real headless
+ * Chromium via puppeteer (the Pinokio host runs this app on a mocked Electron).
+ * @returns {Promise<{errors:string[], engine?:string|null, unavailable?:boolean, skipped?:boolean}>}
+ */
+async function browserCheck(url, opts = {}) {
+    const electronResult = await electronBrowserCheck(url, opts);
+    if (!electronResult.unavailable) return electronResult;
+    if (process.env.XK_CODE_NO_RUNTIME_VERIFY === '1') return { errors: [], skipped: true };
+    const headless = opts.headless || require('./puppeteerBrowser.js');
+    const result = await headless.inspectPage({ url, timeoutMs: opts.timeoutMs || 12000 });
+    return {
+        errors: result.errors || [],
+        engine: result.available ? (result.engine || 'puppeteer') : null,
+        unavailable: !result.available,
+        skipped: !!result.skipped
+    };
 }
 
-module.exports = { runtimeVerify, electronBrowserCheck };
+/** runtimeVerify(projectRoot, htmlRel) for the completion gate — serve + browser check. */
+async function runtimeVerify(projectRoot, htmlRel) {
+    if (process.env.XK_CODE_NO_RUNTIME_VERIFY === '1') {
+        return { ok: true, skipped: true, errors: [] };
+    }
+    return serveAndCheck(projectRoot, htmlRel, browserCheck);
+}
+
+module.exports = { runtimeVerify, browserCheck, electronBrowserCheck };

@@ -163,8 +163,11 @@ function adaptCodeEvent(ev, ctx = {}) {
             total: ev.total,
             budgetPct: ev.total ? Math.round((ev.used / ev.total) * 100) : null
         };
+    case 'reasoning_delta':
     case 'delta':
         return { type: 'thinking', text: ev.text || '', status: 'running' };
+    case 'assistant_delta':
+        return { type: 'assistant', content: ev.text || '', status: 'running' };
     case 'tool_start':
         return {
             type: 'tool',

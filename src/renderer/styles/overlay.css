@@ -745,6 +745,15 @@ button, .test-btn, .clear-btn, .wa-btn {
     color: var(--accent-color) !important;
     background: var(--surface-hover) !important;
 }
+/* No project folder selected yet: contextLabel.js adds .ctx-folder--set only once a
+   workspace exists. Until then the folder icon must NOT light up live green on hover —
+   an unset workspace is a warning state, not a ready one. */
+#here-i-am-btn:not(.ctx-folder--set) { color: #d29922 !important; }
+#here-i-am-btn:not(.ctx-folder--set):hover {
+    color: #d29922 !important;
+    background: color-mix(in srgb, #d29922 12%, transparent) !important;
+    border-color: color-mix(in srgb, #d29922 45%, transparent) !important;
+}
 #send-btn {
     background: linear-gradient(180deg, var(--accent-color), var(--accent-dim)) !important;
     color: #03130a !important;
@@ -1068,6 +1077,28 @@ body.electron-app #admin-overlay {
     color: var(--text-color);
     max-height: 420px;
 }
+
+/* ============================================================================
+   Interstitial model text — the model's own words between tool calls
+   (conclusions, mid-run reports). Persistent; only reasoning is per-turn.
+   ========================================================================== */
+.activity-note {
+    margin: 8px 0 10px;
+    padding: 8px 12px;
+    border-left: 2px solid color-mix(in srgb, var(--accent-color) 40%, transparent);
+    background: rgba(0, 0, 0, 0.18);
+    border-radius: 4px;
+    font-family: var(--font-ui);
+    font-size: 0.88rem;
+    line-height: 1.55;
+    color: var(--text-bright);
+    /* Live phase: plain text, no markdown parse per token. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.activity-note--md { white-space: normal; }
+.activity-note--md > :first-child { margin-top: 0; }
+.activity-note--md > :last-child { margin-bottom: 0; }
 
 /* ============================================================================
    Structured tool input/output — readable key/value lines, not raw JSON.

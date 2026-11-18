@@ -146,8 +146,8 @@ async function runToolPipeline({ name, args, callId, body, deps = {}, signal }) 
             // v54.5: per-call bound — long builds (electron-builder, npm run dist, …) get a
             // build-sized window instead of being rejected at the flat 5-minute line, which
             // is what killed every "package this into an AppImage/.deb" task.
-            const { exclusiveBoundFor } = require('../../shared/longBuildPolicy.js');
-            const boundMs = exclusiveBoundFor(name, ctx.args, deps.exclusiveTimeoutMs || 300000);
+            const { exclusiveBoundFor, DEFAULT_EXCLUSIVE_BOUND_MS } = require('../../shared/longBuildPolicy.js');
+            const boundMs = exclusiveBoundFor(name, ctx.args, deps.exclusiveTimeoutMs || DEFAULT_EXCLUSIVE_BOUND_MS);
             result = await withTimeout(body(), boundMs, name, signal);
         } else {
             result = await body();

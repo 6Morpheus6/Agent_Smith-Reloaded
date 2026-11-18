@@ -25,6 +25,10 @@ test('harness routing: every model family lands on the right strategy', () => {
     assert.equal(getModelHarness('kimi-k3').id, 'kimi-k3');
     assert.equal(getModelHarness('moonshot/kimi-k3-instruct').id, 'kimi-k3');
     assert.equal(getModelHarness('qwen2.5-coder-7b').id, 'default');
+    assert.equal(getModelHarness('qwen3.8-27b-uncensored').id, 'qwen');
+    // A Qwen3.8 finetune keeps the strict template but not the name — it must still be
+    // usable, which is why the system-message normalization is model-agnostic.
+    assert.equal(getModelHarness('eriktonon/bonsai-2-uncensored:27b').id, 'default');
     assert.equal(getModelHarness('deepseek-r1-32b').id, 'default');
     assert.equal(getModelHarness('').id, 'default');
     assert.equal(getModelHarness(null).id, 'default');
@@ -84,7 +88,7 @@ test('adaptMessagesForModel is idempotent for gemma (safe to re-run every turn)'
 
 // --- Passthrough families --------------------------------------------------------
 
-test('default + kimi strategies pass messages through untouched (native tool path)', () => {
+test('default + kimi strategies leave an already-valid history untouched', () => {
     for (const model of ['qwen2.5-coder-7b', 'kimi-k3']) {
         const out = adaptMessagesForModel(GEMMA_HISTORY, model, {
             toolNames: ['write_file'], serializeToolHistory: true
@@ -93,9 +97,48 @@ test('default + kimi strategies pass messages through untouched (native tool pat
     }
 });
 
+// --- Strict-template system placement (all models) --------------------------------
+
+test('every non-gemma model gets one leading system block and no late system notes', () => {
+    const codeModePrompt = [
+        { role: 'system', content: 'persona' },
+        { role: 'system', content: 'phase hint' },
+        { role: 'system', content: 'plan anchor' },
+        { role: 'system', content: 'code plan context' },
+        { role: 'user', content: 'build a page' },
+        { role: 'assistant', content: '', tool_calls: [] },
+        { role: 'system', content: '[HARNESS — no files written]' }
+    ];
+    for (const model of ['eriktonon/bonsai-2-uncensored:27b', 'llama-3.3-70b', 'qwen3.8-27b']) {
+        const out = adaptMessagesForModel(codeModePrompt, model, { toolNames: [] });
+        assert.equal(out[0].role, 'system', `${model}: prompt must still open with system`);
+        assert.equal(out.filter(m => m.role === 'system').length, 1,
+            `${model}: exactly one system message (template raises otherwise)`);
+        assert.ok(out[0].content.includes('persona') && out[0].content.includes('code plan context'),
+            `${model}: leading system blocks merged, not dropped`);
+        assert.ok(out.some(m => m.role === 'user' && m.content.includes('[HARNESS')),
+            `${model}: late system nudge preserved as a user turn`);
+        assert.ok(!out.some(m => m.role === 'assistant' && !String(m.content || '').trim()),
+            `${model}: empty assistant turns dropped`);
+    }
+});
+
+test('system normalization is idempotent for the default strategy', () => {
+    const history = [
+        { role: 'system', content: 'a' },
+        { role: 'system', content: 'b' },
+        { role: 'user', content: 'go' },
+        { role: 'system', content: 'nudge' }
+    ];
+    const once = adaptMessagesForModel(history, 'eriktonon/bonsai-2-uncensored:27b', {});
+    const twice = adaptMessagesForModel(once, 'eriktonon/bonsai-2-uncensored:27b', {});
+    assert.deepEqual(twice, once);
+});
+
 // --- Temperature pins ------------------------------------------------------------
 
 test('temperature pins: kimi-k3 forced to 1, everything else respected', () => {
+    assert.equal(pinTemperatureForModel('eriktonon/bonsai-2-uncensored:27b', 0.2), 0.2);
     assert.equal(pinTemperatureForModel('kimi-k3', 0.2), 1);
     assert.equal(pinTemperatureForModel('Kimi-K3', 0.7), 1);
     assert.equal(pinTemperatureForModel('kimi-k2.6', 0.2), 0.2, 'non-K3 kimi keeps caller temperature');

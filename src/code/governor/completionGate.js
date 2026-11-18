@@ -266,7 +266,14 @@ async function runValidation(projectRoot, filesTouched, goal, opts = {}) {
     // disk — otherwise a run that only writes e.g. utils.js falsely passes while index.html
     // references files that were never created. Skip a host app's own index.html (an
     // Electron/main.js repo), which is not the deliverable.
-    if (!htmlRel && goalImpliesNewArtifacts(goal) && !detectAppRepo(projectRoot)) {
+    //
+    // `files.length` is part of the condition on purpose: reuse means "this run touched SOME
+    // file, validate the entry point around it". With ZERO files written there is nothing of
+    // ours on disk, and a deep scan just finds whatever app already lives in the workspace —
+    // e.g. the harness's own renderer, which then reported its settings toggles and its own
+    // bundle as the "game" (6 green acceptance checks, 45 findings, all about Agent Smith).
+    // Nothing written means nothing to validate: say so instead of grading someone else's tree.
+    if (!htmlRel && files.length && goalImpliesNewArtifacts(goal) && !detectAppRepo(projectRoot)) {
         htmlRel = findProjectIndexHtml(projectRoot);
     }
 
